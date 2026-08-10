@@ -17,7 +17,7 @@ package osac.private.v1;
 
 import "buf/validate/validate.proto";
 import "osac/private/v1/metadata_type.proto";
-import "osac/private/v1/security_group_type.proto";
+import "osac/private/v1/security_rule_type.proto";
 
 // Describes a network implementation strategy available for creating virtual networks.
 //

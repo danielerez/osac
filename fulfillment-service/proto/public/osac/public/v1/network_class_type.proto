@@ -18,7 +18,7 @@ package osac.public.v1;
 import "buf/validate/validate.proto";
 import "google/api/field_behavior.proto";
 import "osac/public/v1/metadata_type.proto";
-import "osac/public/v1/security_group_type.proto";
+import "osac/public/v1/security_rule_type.proto";
 
 // Describes a network implementation strategy available for creating virtual networks.
 //

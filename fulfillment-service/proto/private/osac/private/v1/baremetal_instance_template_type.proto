@@ -17,7 +17,7 @@ package osac.private.v1;
 
 import "buf/validate/validate.proto";
 import "google/protobuf/any.proto";
-import "osac/private/v1/baremetal_instance_type.proto";
+import "osac/private/v1/baremetal_instance_common_type.proto";
 import "osac/private/v1/metadata_type.proto";
 
 // A bare metal instance template defines a hardware profile (host type, OS image, network configuration)

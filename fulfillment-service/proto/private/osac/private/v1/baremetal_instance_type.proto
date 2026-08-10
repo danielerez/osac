@@ -19,19 +19,11 @@ import "buf/validate/validate.proto";
 import "google/api/field_behavior.proto";
 import "google/protobuf/any.proto";
 import "google/protobuf/timestamp.proto";
+import "osac/private/v1/baremetal_instance_common_type.proto";
 import "osac/private/v1/condition_status_type.proto";
 import "osac/private/v1/metadata_type.proto";
 import "osac/private/v1/security_group_type.proto";
 import "osac/private/v1/subnet_type.proto";
-
-// Contains the image configuration for a bare metal instance.
-message BareMetalInstanceImage {
-  // Image source type (e.g. "registry").
-  string source_type = 1;
-
-  // Image reference (e.g. OCI image URL).
-  string source_ref = 2;
-}
 
 // Contains the details of a bare metal instance.
 //

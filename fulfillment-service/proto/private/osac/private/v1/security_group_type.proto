@@ -17,6 +17,7 @@ package osac.private.v1;
 
 import "google/api/field_behavior.proto";
 import "osac/private/v1/metadata_type.proto";
+import "osac/private/v1/security_rule_type.proto";
 import "osac/private/v1/virtual_network_type.proto";
 
 // Represents a virtual firewall controlling network traffic for compute instances.
@@ -96,88 +97,6 @@ message SecurityGroupSpec {
     (google.api.field_behavior) = OUTPUT_ONLY,
     (google.api.field_behavior) = IMMUTABLE
   ];
-}
-
-// Defines a single firewall rule for network traffic filtering.
-//
-// SecurityRule specifies which traffic to allow based on protocol, port ranges (for TCP/UDP), and source/
-// destination CIDR blocks. Rules are stateful - return traffic for established connections is automatically
-// allowed.
-//
-// Port ranges apply only to TCP and UDP protocols. For ICMP and ALL protocols, port fields are ignored.
-//
-// CIDR fields support IPv4-only, IPv6-only, or dual-stack configurations:
-// - IPv4-only: Set ipv4_cidr, leave ipv6_cidr empty
-// - IPv6-only: Set ipv6_cidr, leave ipv4_cidr empty
-// - Dual-stack: Set both ipv4_cidr and ipv6_cidr (creates two separate rules internally)
-message SecurityRule {
-  // Protocol to match for this rule.
-  //
-  // Use PROTOCOL_ALL to match all protocols (wildcard). Use PROTOCOL_TCP or PROTOCOL_UDP when port ranges
-  // are needed. Use PROTOCOL_ICMP for ping and other ICMP traffic.
-  Protocol protocol = 1;
-
-  // Starting port number for the rule (1-65535).
-  //
-  // Required for tcp/udp protocols, ignored for icmp/all. For single port, set port_from = port_to.
-  // Must be <= port_to. Validation enforced at service layer.
-  //
-  // Example: 22 (SSH), 80 (HTTP), 443 (HTTPS), 3306 (MySQL)
-  optional int32 port_from = 2;
-
-  // Ending port number for the rule (1-65535).
-  //
-  // Required for tcp/udp protocols, ignored for icmp/all. Must be >= port_from. For single port, set
-  // port_from = port_to. Validation enforced at service layer.
-  //
-  // Example: 22 (single port), 8000 (range 8000-9000)
-  optional int32 port_to = 3;
-
-  // IPv4 CIDR block for source (ingress) or destination (egress) addresses.
-  //
-  // Must be valid CIDR notation. Use '0.0.0.0/0' to match all IPv4 addresses. Validation enforced at
-  // service layer.
-  //
-  // Example: '192.168.1.0/24', '10.0.0.0/8', '0.0.0.0/0' (all IPv4)
-  optional string ipv4_cidr = 4;
-
-  // IPv6 CIDR block for source (ingress) or destination (egress) addresses.
-  //
-  // Must be valid CIDR notation. Use '::/0' to match all IPv6 addresses. Validation enforced at service
-  // layer.
-  //
-  // Example: '2001:db8::/32', 'fd00::/64', '::/0' (all IPv6)
-  optional string ipv6_cidr = 5;
-}
-
-// Network protocol types for SecurityRule matching.
-//
-// Determines which layer 4 protocol the rule applies to. Protocol affects whether port range fields are
-// applicable (TCP/UDP) or ignored (ICMP/ALL).
-enum Protocol {
-  // Unknown protocol (invalid). This should never be used in actual rules.
-  PROTOCOL_UNSPECIFIED = 0;
-
-  // TCP protocol. Port ranges (port_from, port_to) are required for TCP rules.
-  //
-  // Used for connection-oriented protocols like HTTP, HTTPS, SSH, database connections, etc.
-  PROTOCOL_TCP = 1;
-
-  // UDP protocol. Port ranges (port_from, port_to) are required for UDP rules.
-  //
-  // Used for connectionless protocols like DNS, NTP, DHCP, VoIP, etc.
-  PROTOCOL_UDP = 2;
-
-  // ICMP protocol (ping and other control messages). Port ranges are not applicable.
-  //
-  // Used for network diagnostics (ping), error reporting, and control messages.
-  PROTOCOL_ICMP = 3;
-
-  // All protocols (wildcard). Port ranges are not applicable.
-  //
-  // Matches any protocol. Useful for allowing all traffic from a trusted CIDR block or for egress rules
-  // that permit all outbound traffic.
-  PROTOCOL_ALL = 4;
 }
 
 // Represents the current operational state of a SecurityGroup.

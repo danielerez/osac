@@ -130,3 +130,11 @@ message ClusterTemplateSpecDefaults {
   // ClusterVersion must exist, be enabled, and not be in `OBSOLETE` state.
   ClusterVersionReference version = 5;
 }
+
+// Reference to a ClusterTemplate resource.
+message ClusterTemplateReference {
+  string id = 1;
+  string name = 2;
+  string project = 3;
+  bool shared = 4;
+}

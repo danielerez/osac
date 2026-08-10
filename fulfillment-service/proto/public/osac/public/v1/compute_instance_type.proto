@@ -18,7 +18,9 @@ package osac.public.v1;
 import "google/api/field_behavior.proto";
 import "google/protobuf/any.proto";
 import "google/protobuf/timestamp.proto";
+import "osac/public/v1/compute_instance_catalog_item_type.proto";
 import "osac/public/v1/compute_instance_common_type.proto";
+import "osac/public/v1/compute_instance_template_type.proto";
 import "osac/public/v1/condition_status_type.proto";
 import "osac/public/v1/metadata_type.proto";
 import "osac/public/v1/instance_type_type.proto";
@@ -382,20 +384,4 @@ enum ComputeInstanceConditionType {
 message ComputeInstanceLocalReference {
   string id = 1;
   string name = 2;
-}
-
-// Reference to a ComputeInstanceTemplate resource.
-message ComputeInstanceTemplateReference {
-  string id = 1;
-  string name = 2;
-  string project = 3;
-  bool shared = 4;
-}
-
-// Reference to a ComputeInstanceCatalogItem resource.
-message ComputeInstanceCatalogItemReference {
-  string id = 1;
-  string name = 2;
-  string project = 3;
-  bool shared = 4;
 }

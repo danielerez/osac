@@ -47,3 +47,11 @@ message BareMetalInstanceCatalogItem {
   // Definitions of the fields that users can or cannot set when creating a resource from this catalog item.
   repeated FieldDefinition field_definitions = 8;
 }
+
+// Reference to a BareMetalInstanceCatalogItem resource.
+message BareMetalInstanceCatalogItemReference {
+  string id = 1;
+  string name = 2;
+  string project = 3;
+  bool shared = 4;
+}

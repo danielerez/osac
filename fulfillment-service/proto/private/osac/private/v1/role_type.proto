@@ -73,3 +73,11 @@ enum RoleState {
   // The role failed to be applied to the underlying authorization system.
   ROLE_STATE_FAILED = 3;
 }
+
+// Reference to a Role resource.
+message RoleReference {
+  string id = 1;
+  string name = 2;
+  string project = 3;
+  bool shared = 4;
+}

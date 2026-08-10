@@ -17,6 +17,7 @@ package osac.public.v1;
 
 import "google/api/field_behavior.proto";
 import "osac/public/v1/metadata_type.proto";
+import "osac/public/v1/network_class_type.proto";
 
 // Represents a tenant-isolated virtual network.
 //
@@ -174,12 +175,4 @@ enum VirtualNetworkState {
 message VirtualNetworkLocalReference {
   string id = 1;
   string name = 2;
-}
-
-// Reference to a NetworkClass resource.
-message NetworkClassReference {
-  string id = 1;
-  string name = 2;
-  string project = 3;
-  bool shared = 4;
 }

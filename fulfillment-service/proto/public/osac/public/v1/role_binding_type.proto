@@ -16,6 +16,7 @@ syntax = "proto3";
 package osac.public.v1;
 
 import "osac/public/v1/metadata_type.proto";
+import "osac/public/v1/role_type.proto";
 import "osac/public/v1/user_type.proto";
 
 // Represents a binding between a role and a set of users.
@@ -76,10 +77,3 @@ enum RoleBindingState {
   ROLE_BINDING_STATE_FAILED = 3;
 }
 
-// Reference to a Role resource.
-message RoleReference {
-  string id = 1;
-  string name = 2;
-  string project = 3;
-  bool shared = 4;
-}

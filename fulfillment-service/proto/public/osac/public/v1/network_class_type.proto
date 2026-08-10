@@ -193,3 +193,11 @@ enum NetworkClassState {
   // The network class has encountered an error and cannot be used for creating VirtualNetworks.
   NETWORK_CLASS_STATE_FAILED = 3;
 }
+
+// Reference to a NetworkClass resource.
+message NetworkClassReference {
+  string id = 1;
+  string name = 2;
+  string project = 3;
+  bool shared = 4;
+}

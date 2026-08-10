@@ -15,9 +15,9 @@ syntax = "proto3";
 
 package osac.public.v1;
 
+import "osac/public/v1/cluster_template_type.proto";
 import "osac/public/v1/field_definition_type.proto";
 import "osac/public/v1/metadata_type.proto";
-import "osac/public/v1/cluster_type.proto";
 
 // A cluster catalog item defines a curated infrastructure offering that references an underlying cluster template.
 // Admins control which fields users can set, enforce defaults, and validate input via JSON Schema.
@@ -45,4 +45,12 @@ message ClusterCatalogItem {
 
   // Definitions of the fields that users can or cannot set when creating a resource from this catalog item.
   repeated FieldDefinition field_definitions = 8;
+}
+
+// Reference to a ClusterCatalogItem resource.
+message ClusterCatalogItemReference {
+  string id = 1;
+  string name = 2;
+  string project = 3;
+  bool shared = 4;
 }

@@ -66,3 +66,11 @@ message ClusterTemplateSpecDefaults {
   // Default ClusterVersion for clusters created with this template.
   ClusterVersionReference version = 5;
 }
+
+// Reference to a ClusterTemplate resource.
+message ClusterTemplateReference {
+  string id = 1;
+  string name = 2;
+  string project = 3;
+  bool shared = 4;
+}

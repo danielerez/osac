@@ -76,4 +76,3 @@ enum RoleBindingState {
   // The role binding failed to be applied to the underlying authorization system.
   ROLE_BINDING_STATE_FAILED = 3;
 }
-

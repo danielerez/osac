@@ -23,7 +23,7 @@ operator:
     computeInstance: true
     tenant: true
     networking: true
-    bareMetalInstance: false
+    bareMetalInstance: true
   certs:
     issuerRef:
       name: default-ca

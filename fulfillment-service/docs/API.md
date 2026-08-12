@@ -431,7 +431,7 @@ The URL space must never be deeper than a collection and its members. For exampl
 belongs to a `VirtualNetwork`, do not define a nested URL like
 `/api/fulfillment/v1/virtual_networks/123/subnets`. Instead, `Subnet` has its own top-level
 collection at `/api/fulfillment/v1/subnets`, and users find the subnets of a virtual network using
-the filter capability with a CEL expression like `this.spec.virtual_network == "123"`.
+the filter capability with a CEL expression like `this.spec.virtual_network.name == "my-vnet"`.
 
 ### HTTP verb mapping
 
@@ -492,30 +492,170 @@ top-level `state` enum.
 
 ## Object references
 
-When an object needs to reference another object, define a `string` field named after the
-relationship or the type of the referenced object. The value of the field is the unique identifier
-of the referenced object.
+When an object needs to reference another object, the API uses typed reference messages instead of
+plain string fields. Each referenced type has its own message, giving the schema full type safety
+and enabling automatic server-side validation and resolution.
 
-For example, when a `Cluster` references a template:
+There are two kinds of references:
+
+### Full references
+
+Full references can point to resources in a different project or in the shared tenant. They have
+four fields:
 
 ```protobuf
-message ClusterSpec {
-  string template = 1;
+message ClusterTemplateReference {
+  string id = 1;
+  string name = 2;
+  string project = 3;
+  bool shared = 4;
 }
 ```
 
-Note that the field name is `template`, not `template_id`. The convention is to name the field
-after the relationship, without an `_id` suffix.
+| Field     | Description |
+|-----------|-------------|
+| `id`      | Unique identifier of the referenced object. |
+| `name`    | Human-readable name of the referenced object. |
+| `project` | Project where the referenced object lives. Defaults to the caller's project when omitted. |
+| `shared`  | When `true`, the lookup targets the `shared` tenant (overrides the caller's tenant). |
 
-Other examples from the codebase:
+Callers may supply `id`, `name`, or both. When both are provided they must refer to the same
+object; otherwise the server returns `InvalidArgument`. The server auto-populates whichever field
+is missing after a successful lookup.
 
-- `SubnetSpec.virtual_network` references a `VirtualNetwork` by its `id`.
-- `RoleBindingSpec.role` references a `Role` by its `id`.
-- `ProjectSpec.parent` references a parent `Project` by its `id`.
+Full references are used when the target resource may live outside the caller's project — for
+example, cluster templates, catalog items, host types, instance types, network classes, IP pools,
+roles, and users.
 
-In the future the project plans to introduce a typed `Reference` message to make these references
-type-safe. Until then, references are plain `string` fields and the relationship must be documented
-in the proto comments.
+### Local references
+
+Local references are scoped to the same tenant and project as the parent object. They have only
+two fields:
+
+```protobuf
+message VirtualNetworkLocalReference {
+  string id = 1;
+  string name = 2;
+}
+```
+
+As with full references, callers may supply `id`, `name`, or both, and the server auto-populates
+the other.
+
+Local references are used when the target is always co-located — for example, a `Subnet`
+referencing its parent `VirtualNetwork`, or a `NetworkAttachment` referencing a `Subnet` and
+`SecurityGroup`.
+
+### Naming convention
+
+Each reference type is named `<TargetType>Reference` or `<TargetType>LocalReference` and is
+defined in the target type's `*_type.proto` file. The spec field that uses it is named after the
+relationship (e.g., `template`, `virtual_network`, `role`), not after the reference type itself.
+
+### Wire format (REST/JSON)
+
+In the REST/JSON representation, reference fields are nested objects:
+
+```json
+{
+  "spec": {
+    "template": { "name": "sandbox" },
+    "version": { "name": "4-17-0" }
+  }
+}
+```
+
+For local references the format is identical but without `project` and `shared`:
+
+```json
+{
+  "spec": {
+    "virtual_network": { "name": "my-vnet" }
+  }
+}
+```
+
+Repeated references (e.g., security groups in a network attachment) are arrays of objects:
+
+```json
+{
+  "subnet": { "name": "my-subnet" },
+  "security_groups": [
+    { "name": "sg-web" },
+    { "name": "sg-ssh" }
+  ]
+}
+```
+
+### Cross-project references
+
+To reference a resource in a different project within the same tenant, set the `project` field:
+
+```json
+{
+  "spec": {
+    "template": { "name": "shared-tpl", "project": "templates" }
+  }
+}
+```
+
+To reference a resource owned by the shared tenant (e.g., a globally available template), set
+`shared` to `true`:
+
+```json
+{
+  "spec": {
+    "template": { "name": "sandbox", "shared": true }
+  }
+}
+```
+
+### Server-side validation and resolution
+
+The server validates references automatically via a gRPC interceptor on `Create` and `Update`
+requests. For each reference field the interceptor:
+
+1. Determines the lookup scope (caller's tenant/project for local references; explicit
+   `project`/`shared` overrides for full references).
+2. Looks up the referenced object by `id`, `name`, or both.
+3. If both `id` and `name` are provided, verifies they refer to the same object.
+4. Auto-populates whichever of `id` or `name` was not provided by the caller.
+
+Invalid references produce an `InvalidArgument` error with `google.rpc.BadRequest` details
+containing one `FieldViolation` per invalid reference. The `field` value is the dot-separated
+path to the reference field (e.g., `object.spec.template`, `object.spec.network_attachments[0].subnet`).
+
+### Reference types in the API
+
+**Full references** (support cross-project via `project` and `shared`):
+
+| Reference type | Used by |
+|----------------|---------|
+| `ClusterTemplateReference` | `ClusterSpec.template`, `ClusterCatalogItem.template` |
+| `ClusterVersionReference` | `ClusterSpec.version` |
+| `ClusterCatalogItemReference` | `ClusterSpec.catalog_item` |
+| `ComputeInstanceTemplateReference` | `ComputeInstanceSpec.template`, `ComputeInstanceCatalogItem.template` |
+| `ComputeInstanceCatalogItemReference` | `ComputeInstanceSpec.catalog_item` |
+| `InstanceTypeReference` | `ComputeInstanceSpec.instance_type` |
+| `BareMetalInstanceTemplateReference` | `BareMetalInstanceCatalogItem.template` |
+| `BareMetalInstanceCatalogItemReference` | `BareMetalInstanceSpec.catalog_item` |
+| `HostTypeReference` | `ClusterTemplateNodeSet.host_type`, `ClusterNodeSet.host_type` |
+| `NetworkClassReference` | `VirtualNetworkSpec.network_class` |
+| `ExternalIPPoolReference` | `ExternalIPSpec.pool` |
+| `RoleReference` | `RoleBindingSpec.role` |
+| `UserReference` | `RoleBindingSpec.users`, `ProjectMembershipSpec.users` |
+
+**Local references** (same tenant and project only):
+
+| Reference type | Used by |
+|----------------|---------|
+| `VirtualNetworkLocalReference` | `SubnetSpec.virtual_network`, `SecurityGroupSpec.virtual_network`, `NATGatewaySpec.virtual_network` |
+| `SubnetLocalReference` | `NetworkAttachment.subnet` |
+| `SecurityGroupLocalReference` | `NetworkAttachment.security_groups` |
+| `ExternalIPLocalReference` | `ExternalIPAttachmentSpec.external_ip`, `NATGatewaySpec.external_ip` |
+| `ComputeInstanceLocalReference` | `ExternalIPAttachmentSpec.target.compute_instance` |
+| `ClusterLocalReference` | `ExternalIPAttachmentSpec.target.cluster` |
+| `BareMetalInstanceLocalReference` | `ExternalIPAttachmentSpec.target.baremetal_instance` |
 
 ## Documentation
 

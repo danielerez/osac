@@ -500,7 +500,7 @@ There are two kinds of references:
 
 ### Full references
 
-Full references can point to resources in a different project or in the shared tenant. They have
+Full references can point to objects in a different project or in the shared tenant. They have
 four fields:
 
 ```protobuf
@@ -523,7 +523,7 @@ Callers may supply `id`, `name`, or both. When both are provided they must refer
 object; otherwise the server returns `InvalidArgument`. The server auto-populates whichever field
 is missing after a successful lookup.
 
-Full references are used when the target resource may live outside the caller's project — for
+Full references are used when the target object may live outside the caller's project — for
 example, cluster templates, catalog items, host types, instance types, network classes, IP pools,
 roles, and users.
 
@@ -552,9 +552,9 @@ Each reference type is named `<TargetType>Reference` or `<TargetType>LocalRefere
 defined in the target type's `*_type.proto` file. The spec field that uses it is named after the
 relationship (e.g., `template`, `virtual_network`, `role`), not after the reference type itself.
 
-### Wire format (REST/JSON)
+### JSON representation
 
-In the REST/JSON representation, reference fields are nested objects:
+In the JSON representation used by the REST gateway, reference fields are nested objects:
 
 ```json
 {
@@ -589,7 +589,7 @@ Repeated references (e.g., security groups in a network attachment) are arrays o
 
 ### Cross-project references
 
-To reference a resource in a different project within the same tenant, set the `project` field:
+To reference an object in a different project within the same tenant, set the `project` field:
 
 ```json
 {
@@ -599,7 +599,7 @@ To reference a resource in a different project within the same tenant, set the `
 }
 ```
 
-To reference a resource owned by the shared tenant (e.g., a globally available template), set
+To reference an object owned by the shared tenant (e.g., a globally available template), set
 `shared` to `true`:
 
 ```json
@@ -624,38 +624,6 @@ requests. For each reference field the interceptor:
 Invalid references produce an `InvalidArgument` error with `google.rpc.BadRequest` details
 containing one `FieldViolation` per invalid reference. The `field` value is the dot-separated
 path to the reference field (e.g., `object.spec.template`, `object.spec.network_attachments[0].subnet`).
-
-### Reference types in the API
-
-**Full references** (support cross-project via `project` and `shared`):
-
-| Reference type | Used by |
-|----------------|---------|
-| `ClusterTemplateReference` | `ClusterSpec.template`, `ClusterCatalogItem.template` |
-| `ClusterVersionReference` | `ClusterSpec.version` |
-| `ClusterCatalogItemReference` | `ClusterSpec.catalog_item` |
-| `ComputeInstanceTemplateReference` | `ComputeInstanceSpec.template`, `ComputeInstanceCatalogItem.template` |
-| `ComputeInstanceCatalogItemReference` | `ComputeInstanceSpec.catalog_item` |
-| `InstanceTypeReference` | `ComputeInstanceSpec.instance_type` |
-| `BareMetalInstanceTemplateReference` | `BareMetalInstanceCatalogItem.template` |
-| `BareMetalInstanceCatalogItemReference` | `BareMetalInstanceSpec.catalog_item` |
-| `HostTypeReference` | `ClusterTemplateNodeSet.host_type`, `ClusterNodeSet.host_type` |
-| `NetworkClassReference` | `VirtualNetworkSpec.network_class` |
-| `ExternalIPPoolReference` | `ExternalIPSpec.pool` |
-| `RoleReference` | `RoleBindingSpec.role` |
-| `UserReference` | `RoleBindingSpec.users`, `ProjectMembershipSpec.users` |
-
-**Local references** (same tenant and project only):
-
-| Reference type | Used by |
-|----------------|---------|
-| `VirtualNetworkLocalReference` | `SubnetSpec.virtual_network`, `SecurityGroupSpec.virtual_network`, `NATGatewaySpec.virtual_network` |
-| `SubnetLocalReference` | `NetworkAttachment.subnet` |
-| `SecurityGroupLocalReference` | `NetworkAttachment.security_groups` |
-| `ExternalIPLocalReference` | `ExternalIPAttachmentSpec.external_ip`, `NATGatewaySpec.external_ip` |
-| `ComputeInstanceLocalReference` | `ExternalIPAttachmentSpec.target.compute_instance` |
-| `ClusterLocalReference` | `ExternalIPAttachmentSpec.target.cluster` |
-| `BareMetalInstanceLocalReference` | `ExternalIPAttachmentSpec.target.baremetal_instance` |
 
 ## Documentation
 

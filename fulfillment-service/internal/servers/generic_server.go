@@ -393,6 +393,10 @@ func (s *GenericServer[O]) List(ctx context.Context, request any, response any) 
 	}
 	daoResponse, err := listRequest.Do(ctx)
 	if err != nil {
+		var validationErr *dao.ErrValidation
+		if errors.As(err, &validationErr) {
+			return grpcstatus.Errorf(grpccodes.InvalidArgument, "%s", validationErr.Reason)
+		}
 		var deniedErr *dao.ErrDenied
 		if errors.As(err, &deniedErr) {
 			return grpcstatus.Errorf(grpccodes.PermissionDenied, "%s", deniedErr.Reason)

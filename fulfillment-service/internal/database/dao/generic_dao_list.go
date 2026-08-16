@@ -27,8 +27,8 @@ type ListRequest[O Object] struct {
 	request[O]
 	filter   string
 	limit    int32
-	limitSet bool
 	offset   int32
+	limitSet bool
 }
 
 // SetFilter sets the CEL expression that defines which objects should be returned.
@@ -69,7 +69,9 @@ func (r *ListRequest[O]) Do(ctx context.Context) (response *ListResponse[O], err
 func (r *ListRequest[O]) do(ctx context.Context) (response *ListResponse[O], err error) {
 	// Reject negative limits early:
 	if r.limit < 0 {
-		err = fmt.Errorf("limit must be a non-negative integer, but it is %d", r.limit)
+		err = &ErrValidation{
+			Reason: fmt.Sprintf("limit must be a non-negative integer, but it is %d", r.limit),
+		}
 		return
 	}
 
@@ -116,10 +118,10 @@ func (r *ListRequest[O]) do(ctx context.Context) (response *ListResponse[O], err
 		return
 	}
 
-	// When the limit was explicitly set to zero, return only the count:
+	// Return only the count for explicit zero limit:
 	if r.limitSet && r.limit == 0 {
 		response = &ListResponse[O]{
-			total: int32(total), // #nosec G115 -- bounded by MaxLimit
+			total: int32(total), // #nosec G115 -- overflow requires >2B rows
 		}
 		return
 	}
@@ -256,7 +258,7 @@ func (r *ListRequest[O]) do(ctx context.Context) (response *ListResponse[O], err
 	// Create and return the response:
 	response = &ListResponse[O]{
 		size:  int32(len(items)), // #nosec G115 -- bounded by MaxLimit
-		total: int32(total),      // #nosec G115 -- bounded by MaxLimit
+		total: int32(total),      // #nosec G115 -- overflow requires >2B rows
 		items: items,
 	}
 	return

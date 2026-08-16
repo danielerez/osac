@@ -25,9 +25,10 @@ import (
 // ListRequest represents a request to list objects with pagination and filtering.
 type ListRequest[O Object] struct {
 	request[O]
-	filter string
-	limit  int32
-	offset int32
+	filter   string
+	limit    int32
+	limitSet bool
+	offset   int32
 }
 
 // SetFilter sets the CEL expression that defines which objects should be returned.
@@ -36,9 +37,11 @@ func (r *ListRequest[O]) SetFilter(value string) *ListRequest[O] {
 	return r
 }
 
-// SetLimit sets the maximum number of items to return.
+// SetLimit sets the maximum number of items to return. A negative value will cause Do to
+// return an error. Zero means return only the count, skipping the item query.
 func (r *ListRequest[O]) SetLimit(value int32) *ListRequest[O] {
 	r.limit = value
+	r.limitSet = true
 	return r
 }
 
@@ -64,6 +67,12 @@ func (r *ListRequest[O]) Do(ctx context.Context) (response *ListResponse[O], err
 }
 
 func (r *ListRequest[O]) do(ctx context.Context) (response *ListResponse[O], err error) {
+	// Reject negative limits early:
+	if r.limit < 0 {
+		err = fmt.Errorf("limit must be a non-negative integer, but it is %d", r.limit)
+		return
+	}
+
 	// Add tenant visibility filter:
 	err = r.addTenancyFilter(ctx)
 	if err != nil {
@@ -107,6 +116,14 @@ func (r *ListRequest[O]) do(ctx context.Context) (response *ListResponse[O], err
 		return
 	}
 
+	// When the limit was explicitly set to zero, return only the count:
+	if r.limitSet && r.limit == 0 {
+		response = &ListResponse[O]{
+			total: int32(total), // #nosec G115 -- bounded by MaxLimit
+		}
+		return
+	}
+
 	// Fetch the results:
 	buffer.Reset()
 	fmt.Fprintf(
@@ -144,11 +161,9 @@ func (r *ListRequest[O]) do(ctx context.Context) (response *ListResponse[O], err
 	r.sql.params = append(r.sql.params, offset)
 	fmt.Fprintf(&buffer, ` offset $%d`, len(r.sql.params))
 
-	// Add the limit:
+	// Add the limit (negative already rejected, explicit zero already handled):
 	limit := r.limit
-	if limit < 0 {
-		limit = 0
-	} else if limit == 0 {
+	if limit == 0 {
 		limit = r.dao.defaultLimit
 	} else if limit > r.dao.maxLimit {
 		limit = r.dao.maxLimit

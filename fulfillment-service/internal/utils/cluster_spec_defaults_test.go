@@ -108,6 +108,87 @@ var _ = Describe("ApplyClusterSpecDefaults", func() {
 		Expect(spec.GetNetwork().GetServiceCidr()).To(Equal("172.30.0.0/16"))
 	})
 
+	It("Applies pull_secret_secret default when no pull_secret is set", func() {
+		defaults := privatev1.ClusterTemplateSpecDefaults_builder{
+			PullSecretSecret: privatev1.SecretLocalReference_builder{
+				Id:   "secret-id",
+				Name: "secret-name",
+			}.Build(),
+		}.Build()
+
+		spec := privatev1.ClusterSpec_builder{}.Build()
+		ApplyClusterSpecDefaults(spec, defaults)
+
+		Expect(spec.GetPullSecretSecret()).ToNot(BeNil())
+		Expect(spec.GetPullSecretSecret().GetId()).To(Equal("secret-id"))
+		Expect(spec.GetPullSecretSecret().GetName()).To(Equal("secret-name"))
+		Expect(spec.HasPullSecret()).To(BeFalse())
+	})
+
+	It("Does not apply pull_secret_secret default when user sets inline pull_secret", func() {
+		userPullSecret := "user-inline-secret"
+		defaults := privatev1.ClusterTemplateSpecDefaults_builder{
+			PullSecretSecret: privatev1.SecretLocalReference_builder{
+				Id: "secret-id",
+			}.Build(),
+		}.Build()
+
+		spec := privatev1.ClusterSpec_builder{
+			PullSecret: &userPullSecret,
+		}.Build()
+		ApplyClusterSpecDefaults(spec, defaults)
+
+		Expect(spec.GetPullSecret()).To(Equal("user-inline-secret"))
+		Expect(spec.GetPullSecretSecret()).To(BeNil())
+	})
+
+	It("Does not apply pull_secret_secret default when user sets pull_secret_secret", func() {
+		defaults := privatev1.ClusterTemplateSpecDefaults_builder{
+			PullSecretSecret: privatev1.SecretLocalReference_builder{
+				Id: "default-secret-id",
+			}.Build(),
+		}.Build()
+
+		spec := privatev1.ClusterSpec_builder{
+			PullSecretSecret: privatev1.SecretLocalReference_builder{
+				Id: "user-secret-id",
+			}.Build(),
+		}.Build()
+		ApplyClusterSpecDefaults(spec, defaults)
+
+		Expect(spec.GetPullSecretSecret().GetId()).To(Equal("user-secret-id"))
+	})
+
+	It("Applies inline pull_secret default when template has no pull_secret_secret", func() {
+		defaultPullSecret := "default-inline"
+		defaults := privatev1.ClusterTemplateSpecDefaults_builder{
+			PullSecret: &defaultPullSecret,
+		}.Build()
+
+		spec := privatev1.ClusterSpec_builder{}.Build()
+		ApplyClusterSpecDefaults(spec, defaults)
+
+		Expect(spec.GetPullSecret()).To(Equal("default-inline"))
+		Expect(spec.GetPullSecretSecret()).To(BeNil())
+	})
+
+	It("Prefers pull_secret_secret default over inline pull_secret default", func() {
+		defaultPullSecret := "default-inline"
+		defaults := privatev1.ClusterTemplateSpecDefaults_builder{
+			PullSecret: &defaultPullSecret,
+			PullSecretSecret: privatev1.SecretLocalReference_builder{
+				Id: "secret-id",
+			}.Build(),
+		}.Build()
+
+		spec := privatev1.ClusterSpec_builder{}.Build()
+		ApplyClusterSpecDefaults(spec, defaults)
+
+		Expect(spec.GetPullSecretSecret()).ToNot(BeNil())
+		Expect(spec.GetPullSecretSecret().GetId()).To(Equal("secret-id"))
+		Expect(spec.HasPullSecret()).To(BeFalse())
+	})
+
 	It("Clones network defaults to prevent shared state", func() {
 		podCidr := "10.128.0.0/14"
 		defaults := privatev1.ClusterTemplateSpecDefaults_builder{

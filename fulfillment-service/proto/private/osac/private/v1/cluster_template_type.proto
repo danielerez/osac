@@ -20,6 +20,7 @@ import "osac/private/v1/cluster_common_type.proto";
 import "osac/private/v1/cluster_version_type.proto";
 import "osac/private/v1/metadata_type.proto";
 import "osac/private/v1/host_type_type.proto";
+import "osac/private/v1/secret_type.proto";
 
 // buf:lint:ignore OSAC_OBJECT_SHAPE
 message ClusterTemplate {
@@ -65,6 +66,12 @@ message ClusterTemplateSpecDefaults {
 
   // Default ClusterVersion for clusters created with this template.
   ClusterVersionReference version = 5;
+
+  // Default Secret reference for pull secret credentials.
+  //
+  // Mutually exclusive with `pull_secret`. When set, clusters created from this template will use
+  // this secret reference unless the user provides an explicit pull_secret or pull_secret_secret.
+  SecretLocalReference pull_secret_secret = 6;
 }
 
 // Reference to a ClusterTemplate resource.

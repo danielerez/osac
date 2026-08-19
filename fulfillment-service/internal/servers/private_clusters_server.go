@@ -37,6 +37,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
+	"github.com/osac-project/osac/fulfillment-service/internal/references"
 	"github.com/osac-project/osac/fulfillment-service/internal/utils"
 )
 
@@ -63,6 +64,7 @@ type PrivateClustersServer struct {
 	externalIPPoolDao       *dao.GenericDAO[*privatev1.ExternalIPPool]
 	externalIPDao           *dao.GenericDAO[*privatev1.ExternalIP]
 	externalIPAttachmentDao *dao.GenericDAO[*privatev1.ExternalIPAttachment]
+	secretsDao              *dao.GenericDAO[*privatev1.Secret]
 	generic                 *GenericServer[*privatev1.Cluster]
 }
 
@@ -195,6 +197,16 @@ func (b *PrivateClustersServerBuilder) Build() (result *PrivateClustersServer, e
 		return
 	}
 
+	// Create the secrets DAO:
+	secretsDao, err := dao.NewGenericDAO[*privatev1.Secret]().
+		SetLogger(b.logger).
+		SetTenancyLogic(b.tenancyLogic).
+		SetMetricsRegisterer(b.metricsRegisterer).
+		Build()
+	if err != nil {
+		return
+	}
+
 	// Create the generic server:
 	generic, err := NewGenericServer[*privatev1.Cluster]().
 		SetLogger(b.logger).
@@ -221,6 +233,7 @@ func (b *PrivateClustersServerBuilder) Build() (result *PrivateClustersServer, e
 		externalIPPoolDao:       externalIPPoolDao,
 		externalIPDao:           externalIPDao,
 		externalIPAttachmentDao: externalIPAttachmentDao,
+		secretsDao:              secretsDao,
 		generic:                 generic,
 	}
 	return
@@ -398,6 +411,12 @@ func (s *PrivateClustersServer) Update(ctx context.Context,
 	if err != nil {
 		return
 	}
+	if err = s.validatePullSecretMutualExclusionForUpdate(ctx, request); err != nil {
+		return
+	}
+	if err = s.validatePullSecretSecret(ctx, request.GetObject().GetSpec()); err != nil {
+		return
+	}
 	if err = utils.ValidateClusterSpecFields(request.GetObject().GetSpec()); err != nil {
 		return
 	}
@@ -459,6 +478,88 @@ func (s *PrivateClustersServer) lookupTemplate(ctx context.Context,
 		)
 	}
 	return
+}
+
+// validatePullSecretMutualExclusion rejects specs that set both pull_secret and pull_secret_secret.
+func (s *PrivateClustersServer) validatePullSecretMutualExclusion(spec *privatev1.ClusterSpec) error {
+	if spec.HasPullSecret() && spec.GetPullSecretSecret() != nil {
+		return grpcstatus.Errorf(
+			grpccodes.InvalidArgument,
+			"pull_secret and pull_secret_secret are mutually exclusive",
+		)
+	}
+	return nil
+}
+
+// validatePullSecretMutualExclusionForUpdate checks for pull_secret / pull_secret_secret conflicts
+// on Update, accounting for the update mask. When only one of the two fields is in the mask, the
+// other retains its DB value, so a conflict can occur even if the request itself looks clean.
+func (s *PrivateClustersServer) validatePullSecretMutualExclusionForUpdate(
+	ctx context.Context, request *privatev1.ClustersUpdateRequest) error {
+	spec := request.GetObject().GetSpec()
+	mask := request.GetUpdateMask()
+
+	if err := s.validatePullSecretMutualExclusion(spec); err != nil {
+		return err
+	}
+
+	// With a nil/empty mask the entire object is replaced, so no DB state to consider.
+	if mask == nil || len(mask.GetPaths()) == 0 {
+		return nil
+	}
+
+	settingPullSecretSecret := spec.GetPullSecretSecret() != nil && updateIncludesField(mask, "spec.pull_secret_secret")
+	settingPullSecret := spec.HasPullSecret() && updateIncludesField(mask, "spec.pull_secret")
+
+	if !settingPullSecretSecret && !settingPullSecret {
+		return nil
+	}
+
+	existing, found, err := s.getExistingCluster(ctx, request)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	existingSpec := existing.GetSpec()
+
+	if settingPullSecretSecret && existingSpec.HasPullSecret() && !updateIncludesField(mask, "spec.pull_secret") {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "pull_secret and pull_secret_secret are mutually exclusive")
+	}
+	if settingPullSecret && existingSpec.GetPullSecretSecret() != nil && !updateIncludesField(mask, "spec.pull_secret_secret") {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "pull_secret and pull_secret_secret are mutually exclusive")
+	}
+	return nil
+}
+
+func (s *PrivateClustersServer) validatePullSecretSecret(ctx context.Context, spec *privatev1.ClusterSpec) error {
+	ref := spec.GetPullSecretSecret()
+	if ref == nil {
+		return nil
+	}
+	if ref.GetId() == "" && ref.GetName() == "" {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "pull_secret_secret must specify id or name")
+	}
+	resolved, err := references.NewDAOLookupFunc(s.secretsDao)(ctx, "", "", ref.GetId(), ref.GetName())
+	if err != nil {
+		var deniedErr *dao.ErrDenied
+		if errors.As(err, &deniedErr) {
+			return grpcstatus.Errorf(grpccodes.PermissionDenied, "%s", deniedErr.Reason)
+		}
+		var nf interface{ IsNotFound() bool }
+		if errors.As(err, &nf) && nf.IsNotFound() {
+			return grpcstatus.Errorf(grpccodes.InvalidArgument,
+				"there is no secret with identifier or name '%s'", refKey(ref))
+		}
+		s.logger.ErrorContext(ctx, "Failed to resolve pull_secret_secret reference", "error", err)
+		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve pull_secret_secret reference")
+	}
+	resolvedRef := &privatev1.SecretLocalReference{}
+	resolvedRef.SetId(resolved.ID)
+	resolvedRef.SetName(resolved.Name)
+	spec.SetPullSecretSecret(resolvedRef)
+	return nil
 }
 
 func (s *PrivateClustersServer) lookupHostType(ctx context.Context,
@@ -1153,6 +1254,16 @@ func (s *PrivateClustersServer) validateAndTransformCluster(ctx context.Context,
 	// Apply spec defaults from the template (user values take precedence):
 	utils.ApplyClusterSpecDefaults(cluster.GetSpec(), template.GetSpecDefaults())
 
+	// Validate mutual exclusion of inline pull_secret and pull_secret_secret reference:
+	if err = s.validatePullSecretMutualExclusion(cluster.GetSpec()); err != nil {
+		return err
+	}
+
+	// Validate pull_secret_secret reference exists:
+	if err = s.validatePullSecretSecret(ctx, cluster.GetSpec()); err != nil {
+		return err
+	}
+
 	if err = s.ensureClusterVersion(ctx, cluster); err != nil {
 		return err
 	}
@@ -1388,6 +1499,13 @@ func (s *PrivateClustersServer) validateAndTransformCatalogItem(ctx context.Cont
 
 	// Apply spec defaults from the template (user and field_definition values take precedence):
 	utils.ApplyClusterSpecDefaults(cluster.GetSpec(), template.GetSpecDefaults())
+
+	if err := s.validatePullSecretMutualExclusion(cluster.GetSpec()); err != nil {
+		return err
+	}
+	if err := s.validatePullSecretSecret(ctx, cluster.GetSpec()); err != nil {
+		return err
+	}
 
 	// Version resolution (catalog-item path):
 	// user input > field_definition default > template spec_defaults > system default.

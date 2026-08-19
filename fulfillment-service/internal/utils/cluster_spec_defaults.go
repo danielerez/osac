@@ -26,8 +26,12 @@ func ApplyClusterSpecDefaults(spec *privatev1.ClusterSpec, defaults *privatev1.C
 	if spec == nil || defaults == nil {
 		return
 	}
-	if !spec.HasPullSecret() && defaults.HasPullSecret() {
-		spec.SetPullSecret(defaults.GetPullSecret())
+	if !spec.HasPullSecret() && spec.GetPullSecretSecret() == nil {
+		if defaults.GetPullSecretSecret() != nil {
+			spec.SetPullSecretSecret(proto.Clone(defaults.GetPullSecretSecret()).(*privatev1.SecretLocalReference))
+		} else if defaults.HasPullSecret() {
+			spec.SetPullSecret(defaults.GetPullSecret())
+		}
 	}
 	if !spec.HasSshPublicKey() && defaults.HasSshPublicKey() {
 		spec.SetSshPublicKey(defaults.GetSshPublicKey())

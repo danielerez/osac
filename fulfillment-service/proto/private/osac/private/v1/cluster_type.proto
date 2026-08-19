@@ -25,6 +25,7 @@ import "osac/private/v1/cluster_version_type.proto";
 import "osac/private/v1/condition_status_type.proto";
 import "osac/private/v1/metadata_type.proto";
 import "osac/private/v1/host_type_type.proto";
+import "osac/private/v1/secret_type.proto";
 import "osac/private/v1/security_group_type.proto";
 import "osac/private/v1/subnet_type.proto";
 
@@ -68,6 +69,12 @@ message ClusterSpec {
   //
   // This field is immutable after creation — it cannot be changed on update.
   bool auto_external_ip_attachment = 10 [(google.api.field_behavior) = IMMUTABLE];
+
+  // Reference to a Secret resource containing pull secret credentials.
+  //
+  // Mutually exclusive with `pull_secret`. When set, the system resolves the referenced Secret to obtain the pull
+  // secret value. The referenced Secret must exist in the same tenant.
+  SecretLocalReference pull_secret_secret = 11;
 }
 
 message ClusterStatus {

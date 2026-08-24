@@ -15,6 +15,7 @@ package cluster
 
 //go:generate mockgen -source=../../api/osac/private/v1/clusters_service_grpc.pb.go -destination=clusters_client_mock.go -package=cluster ClustersClient
 //go:generate mockgen -source=../../api/osac/private/v1/cluster_versions_service_grpc.pb.go -destination=cluster_versions_client_mock.go -package=cluster ClusterVersionsClient
+//go:generate mockgen -source=../../api/osac/private/v1/secrets_service_grpc.pb.go -destination=secrets_client_mock.go -package=cluster SecretsClient
 
 import (
 	"context"
@@ -25,6 +26,8 @@ import (
 	"slices"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -45,8 +48,14 @@ import (
 // objectPrefix is the prefix that will be used in the `generateName` field of the resources created in the hub.
 const objectPrefix = "order-"
 
+// dockerConfigJSONKey is the Secret data key that holds a Kubernetes dockerconfigjson payload.
+const dockerConfigJSONKey = ".dockerconfigjson"
+
 // errClusterVersionNotFound indicates the requested ClusterVersion does not exist.
 var errClusterVersionNotFound = errors.New("cluster version not found")
+
+// errPullSecretResolution indicates the cluster's pull_secret_secret could not be resolved.
+var errPullSecretResolution = errors.New("failed to resolve pull secret reference")
 
 // FunctionBuilder contains the data and logic needed to build a function that reconciles clustes.
 type FunctionBuilder struct {
@@ -61,6 +70,7 @@ type function struct {
 	clustersClient        privatev1.ClustersClient
 	hubsClient            privatev1.HubsClient
 	clusterVersionsClient privatev1.ClusterVersionsClient
+	secretsClient         privatev1.SecretsClient
 	maskCalculator        *masks.Calculator
 }
 
@@ -117,6 +127,7 @@ func (b *FunctionBuilder) Build() (result controllers.ReconcilerFunction[*privat
 		clustersClient:        privatev1.NewClustersClient(b.connection),
 		hubsClient:            privatev1.NewHubsClient(b.connection),
 		clusterVersionsClient: privatev1.NewClusterVersionsClient(b.connection),
+		secretsClient:         privatev1.NewSecretsClient(b.connection),
 		hubCache:              b.hubCache,
 		maskCalculator:        masks.NewCalculator().Build(),
 	}
@@ -221,6 +232,23 @@ func (t *task) update(ctx context.Context) error {
 				privatev1.ClusterConditionType_CLUSTER_CONDITION_TYPE_PROGRESSING,
 				privatev1.ConditionStatus_CONDITION_STATUS_FALSE,
 				"ResourcesUnavailable",
+				fmt.Sprintf(
+					"The cluster cannot be provisioned: %s.",
+					err,
+				),
+			)
+			return nil
+		}
+		if errors.Is(err, errPullSecretResolution) {
+			t.r.logger.ErrorContext(
+				ctx,
+				"Failed to resolve pull secret reference",
+				slog.String("error", err.Error()),
+			)
+			t.updateCondition(
+				privatev1.ClusterConditionType_CLUSTER_CONDITION_TYPE_PROGRESSING,
+				privatev1.ConditionStatus_CONDITION_STATUS_FALSE,
+				"SecretResolutionFailed",
 				fmt.Sprintf(
 					"The cluster cannot be provisioned: %s.",
 					err,
@@ -337,7 +365,13 @@ func (t *task) buildSpec(ctx context.Context) (osacv1alpha1.ClusterOrderSpec, er
 
 func (t *task) addExplicitFields(ctx context.Context, spec *osacv1alpha1.ClusterOrderSpec) error {
 	clusterSpec := t.cluster.GetSpec()
-	if clusterSpec.HasPullSecret() {
+	if clusterSpec.HasPullSecretSecret() {
+		pullSecret, err := t.resolvePullSecret(ctx, clusterSpec.GetPullSecretSecret())
+		if err != nil {
+			return err
+		}
+		spec.PullSecret = pullSecret
+	} else if clusterSpec.HasPullSecret() {
 		spec.PullSecret = clusterSpec.GetPullSecret()
 	}
 	if clusterSpec.HasSshPublicKey() {
@@ -367,6 +401,41 @@ func (t *task) addExplicitFields(ctx context.Context, spec *osacv1alpha1.Cluster
 		}
 	}
 	return nil
+}
+
+// resolvePullSecret fetches the referenced Secret via the private API and returns the
+// dockerconfigjson payload. Controller credentials on the gRPC connection provide auth.
+func (t *task) resolvePullSecret(ctx context.Context, ref *privatev1.SecretLocalReference) (string, error) {
+	id := ref.GetId()
+	if id == "" {
+		return "", fmt.Errorf("%w: pull_secret_secret has no id", errPullSecretResolution)
+	}
+	response, err := t.r.secretsClient.Get(ctx, privatev1.SecretsGetRequest_builder{
+		Id: id,
+	}.Build())
+	if err != nil {
+		if st, ok := status.FromError(err); ok {
+			switch st.Code() {
+			case codes.NotFound:
+				return "", fmt.Errorf("%w: secret '%s' not found", errPullSecretResolution, id)
+			case codes.Unauthenticated, codes.PermissionDenied:
+				return "", fmt.Errorf("%w: not authorized to read secret '%s'", errPullSecretResolution, id)
+			}
+		}
+		return "", fmt.Errorf("%w: failed to get secret '%s': %w", errPullSecretResolution, id, err)
+	}
+	object := response.GetObject()
+	if object == nil {
+		return "", fmt.Errorf("%w: secret '%s' not found", errPullSecretResolution, id)
+	}
+	raw, ok := object.GetData()[dockerConfigJSONKey]
+	if !ok || len(raw) == 0 {
+		return "", fmt.Errorf(
+			"%w: secret '%s' is missing %s key",
+			errPullSecretResolution, id, dockerConfigJSONKey,
+		)
+	}
+	return string(raw), nil
 }
 
 // resolveVersionImage looks up a ClusterVersion by name and returns its release image.

@@ -22,6 +22,8 @@ import (
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -495,6 +497,73 @@ var _ = Describe("update tenant annotation", func() {
 		Expect(createdCR.Spec.Network.ServiceCIDR).To(Equal(serviceCIDR))
 	})
 
+	It("should resolve pull_secret_secret into ClusterOrder spec.pullSecret", func() {
+		scheme := runtime.NewScheme()
+		Expect(osacv1alpha1.AddToScheme(scheme)).To(Succeed())
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			Build()
+
+		hubCache := controllers.NewMockHubCache(ctrl)
+		hubCache.EXPECT().
+			Get(gomock.Any(), hubID).
+			Return(&controllers.HubEntry{
+				Namespace: hubNamespace,
+				Client:    fakeClient,
+			}, nil)
+
+		resolvedPullSecret := `{"auths":{"quay.io":{"auth":"dXNlcjpwYXNz"}}}`
+		secretsClient := NewMockSecretsClient(ctrl)
+		secretsClient.EXPECT().
+			Get(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(privatev1.SecretsGetResponse_builder{
+				Object: privatev1.Secret_builder{
+					Id: "pull-secret-id",
+					Data: map[string][]byte{
+						dockerConfigJSONKey: []byte(resolvedPullSecret),
+					},
+				}.Build(),
+			}.Build(), nil)
+
+		cluster := privatev1.Cluster_builder{
+			Id: clusterID,
+			Metadata: privatev1.Metadata_builder{
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     tenantName,
+			}.Build(),
+			Spec: privatev1.ClusterSpec_builder{
+				Template: &privatev1.ClusterTemplateReference{Name: "test-template"},
+				PullSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "pull-secret-id",
+				}.Build(),
+			}.Build(),
+			Status: privatev1.ClusterStatus_builder{
+				State: privatev1.ClusterState_CLUSTER_STATE_PROGRESSING,
+				Hub:   hubID,
+			}.Build(),
+		}.Build()
+
+		t := &task{
+			r: &function{
+				logger:         logger,
+				hubCache:       hubCache,
+				secretsClient:  secretsClient,
+				maskCalculator: nil,
+			},
+			cluster: cluster,
+		}
+
+		err := t.update(ctx)
+		Expect(err).ToNot(HaveOccurred())
+
+		list := &osacv1alpha1.ClusterOrderList{}
+		err = fakeClient.List(ctx, list)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(list.Items).To(HaveLen(1))
+		Expect(list.Items[0].Spec.PullSecret).To(Equal(resolvedPullSecret))
+	})
+
 	It("should resolve ReleaseImage via ClusterVersion on every reconcile", func() {
 		resolvedImage := "quay.io/openshift-release-dev/ocp-release:4.17.0-multi"
 		versionName := "4-17-0"
@@ -842,6 +911,129 @@ var _ = Describe("update version resolution failure", func() {
 			}
 		}
 		Expect(found).To(BeTrue(), "should have set ResourcesUnavailable condition")
+	})
+})
+
+var _ = Describe("update pull secret resolution failure", func() {
+	const (
+		clusterID    = "test-cluster-id"
+		tenantName   = "my-tenant"
+		hubID        = "test-hub"
+		hubNamespace = "test-ns"
+		secretID     = "pull-secret-id"
+	)
+
+	var (
+		ctx  context.Context
+		ctrl *gomock.Controller
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		ctrl = gomock.NewController(GinkgoT())
+		DeferCleanup(ctrl.Finish)
+	})
+
+	setupCluster := func() *privatev1.Cluster {
+		return privatev1.Cluster_builder{
+			Id: clusterID,
+			Metadata: privatev1.Metadata_builder{
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     tenantName,
+			}.Build(),
+			Spec: privatev1.ClusterSpec_builder{
+				Template: &privatev1.ClusterTemplateReference{Name: "test-template"},
+				PullSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: secretID,
+				}.Build(),
+			}.Build(),
+			Status: privatev1.ClusterStatus_builder{
+				State: privatev1.ClusterState_CLUSTER_STATE_PROGRESSING,
+				Hub:   hubID,
+			}.Build(),
+		}.Build()
+	}
+
+	runWithSecretError := func(getErr error, getResp *privatev1.SecretsGetResponse) *privatev1.ClustersUpdateRequest {
+		scheme := runtime.NewScheme()
+		Expect(osacv1alpha1.AddToScheme(scheme)).To(Succeed())
+
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(scheme).
+			Build()
+
+		hubCache := controllers.NewMockHubCache(ctrl)
+		hubCache.EXPECT().
+			Get(gomock.Any(), hubID).
+			Return(&controllers.HubEntry{Namespace: hubNamespace, Client: fakeClient}, nil)
+
+		secretsClient := NewMockSecretsClient(ctrl)
+		secretsClient.EXPECT().
+			Get(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(getResp, getErr)
+
+		var updateReq *privatev1.ClustersUpdateRequest
+		clustersClient := NewMockClustersClient(ctrl)
+		clustersClient.EXPECT().
+			Update(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, req *privatev1.ClustersUpdateRequest, _ ...grpc.CallOption) (*privatev1.ClustersUpdateResponse, error) {
+				updateReq = req
+				return &privatev1.ClustersUpdateResponse{Object: req.GetObject()}, nil
+			}).
+			Times(1)
+
+		f := &function{
+			logger:         logger,
+			hubCache:       hubCache,
+			clustersClient: clustersClient,
+			secretsClient:  secretsClient,
+			maskCalculator: nil,
+		}
+
+		err := f.run(ctx, setupCluster())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(updateReq).ToNot(BeNil(), "Update should have been called")
+
+		list := &osacv1alpha1.ClusterOrderList{}
+		err = fakeClient.List(ctx, list)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(list.Items).To(BeEmpty(), "ClusterOrder should not be created when secret resolution fails")
+
+		return updateReq
+	}
+
+	assertSecretResolutionFailed := func(updateReq *privatev1.ClustersUpdateRequest, messageSubstring string) {
+		conditions := updateReq.GetObject().GetStatus().GetConditions()
+		found := false
+		for _, c := range conditions {
+			if c.GetType() == privatev1.ClusterConditionType_CLUSTER_CONDITION_TYPE_PROGRESSING {
+				Expect(c.GetStatus()).To(Equal(privatev1.ConditionStatus_CONDITION_STATUS_FALSE))
+				Expect(c.GetReason()).To(Equal("SecretResolutionFailed"))
+				Expect(c.GetMessage()).To(ContainSubstring(messageSubstring))
+				found = true
+			}
+		}
+		Expect(found).To(BeTrue(), "SecretResolutionFailed condition should be set")
+	}
+
+	It("should set SecretResolutionFailed when the referenced secret is not found", func() {
+		updateReq := runWithSecretError(status.Error(codes.NotFound, "not found"), nil)
+		assertSecretResolutionFailed(updateReq, "not found")
+	})
+
+	It("should set SecretResolutionFailed when secret get is unauthorized", func() {
+		updateReq := runWithSecretError(status.Error(codes.PermissionDenied, "forbidden"), nil)
+		assertSecretResolutionFailed(updateReq, "not authorized")
+	})
+
+	It("should set SecretResolutionFailed when secret is missing .dockerconfigjson", func() {
+		updateReq := runWithSecretError(nil, privatev1.SecretsGetResponse_builder{
+			Object: privatev1.Secret_builder{
+				Id:   secretID,
+				Data: map[string][]byte{"other": []byte("value")},
+			}.Build(),
+		}.Build())
+		assertSecretResolutionFailed(updateReq, dockerConfigJSONKey)
 	})
 })
 

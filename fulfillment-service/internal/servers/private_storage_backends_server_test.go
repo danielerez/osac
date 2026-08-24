@@ -28,6 +28,7 @@ import (
 
 	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
 )
 
@@ -557,5 +558,230 @@ var _ = Describe("Private storage backends server", func() {
 		object := event.GetStorageBackend()
 		Expect(object).ToNot(BeNil())
 		Expect(object.GetSpec().GetCredentials().GetPassword()).To(BeEmpty())
+	})
+})
+
+var _ = Describe("Password secret reference", func() {
+	var server *PrivateStorageBackendsServer
+
+	BeforeEach(func() {
+		var err error
+		server, err = NewPrivateStorageBackendsServer().
+			SetLogger(logger).
+			SetAttributionLogic(attribution).
+			SetTenancyLogic(tenancy).
+			Build()
+		Expect(err).ToNot(HaveOccurred())
+
+		secretsDao, err := dao.NewGenericDAO[*privatev1.Secret]().
+			SetLogger(logger).
+			SetTenancyLogic(tenancy).
+			Build()
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = secretsDao.Create().SetObject(privatev1.Secret_builder{
+			Id: "my-secret-id",
+			Metadata: privatev1.Metadata_builder{
+				Name:   "my-secret-name",
+				Tenant: auth.SharedTenant,
+			}.Build(),
+		}.Build()).Do(ctx)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	createBackend := func(creds *privatev1.StorageBackendCredentials) (*privatev1.StorageBackendsCreateResponse, error) {
+		return server.Create(ctx, privatev1.StorageBackendsCreateRequest_builder{
+			Object: privatev1.StorageBackend_builder{
+				Metadata: privatev1.Metadata_builder{
+					Name: fmt.Sprintf("backend-%s", uuid.New().String()[:8]),
+				}.Build(),
+				Spec: privatev1.StorageBackendSpec_builder{
+					Provider:    "vast",
+					Endpoint:    "https://storage.example.com:8443",
+					Credentials: creds,
+				}.Build(),
+			}.Build(),
+		}.Build())
+	}
+
+	It("Creates a storage backend with password_secret by id", func() {
+		response, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			PasswordSecret: privatev1.SecretLocalReference_builder{
+				Id: "my-secret-id",
+			}.Build(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		ref := response.GetObject().GetSpec().GetCredentials().GetPasswordSecret()
+		Expect(ref).ToNot(BeNil())
+		Expect(ref.GetId()).To(Equal("my-secret-id"))
+		Expect(ref.GetName()).To(Equal("my-secret-name"))
+		Expect(response.GetObject().GetSpec().GetCredentials().GetPassword()).To(BeEmpty())
+	})
+
+	It("Creates a storage backend with password_secret by name", func() {
+		response, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			PasswordSecret: privatev1.SecretLocalReference_builder{
+				Name: "my-secret-name",
+			}.Build(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		ref := response.GetObject().GetSpec().GetCredentials().GetPasswordSecret()
+		Expect(ref.GetId()).To(Equal("my-secret-id"))
+		Expect(ref.GetName()).To(Equal("my-secret-name"))
+	})
+
+	It("Creates a storage backend with both password and password_secret", func() {
+		_, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			Password: "secret",
+			PasswordSecret: privatev1.SecretLocalReference_builder{
+				Id: "my-secret-id",
+			}.Build(),
+		}.Build())
+		Expect(err).To(HaveOccurred())
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+	})
+
+	It("Rejects a nonexistent password_secret", func() {
+		_, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			PasswordSecret: privatev1.SecretLocalReference_builder{
+				Id: "nonexistent-secret",
+			}.Build(),
+		}.Build())
+		Expect(err).To(HaveOccurred())
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("there is no secret"))
+	})
+
+	It("Rejects an empty password_secret reference", func() {
+		_, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username:       "admin",
+			PasswordSecret: privatev1.SecretLocalReference_builder{}.Build(),
+		}.Build())
+		Expect(err).To(HaveOccurred())
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("password_secret must specify id or name"))
+	})
+
+	It("Creates a storage backend with inline password only", func() {
+		response, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			Password: "secret",
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		Expect(response.GetObject().GetSpec().GetCredentials().GetPassword()).To(Equal("secret"))
+		Expect(response.GetObject().GetSpec().GetCredentials().GetPasswordSecret()).To(BeNil())
+	})
+
+	It("Updates a storage backend with a valid password_secret", func() {
+		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			Password: "secret",
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+
+		updateResponse, err := server.Update(ctx, privatev1.StorageBackendsUpdateRequest_builder{
+			Object: privatev1.StorageBackend_builder{
+				Id: created.GetObject().GetId(),
+				Spec: privatev1.StorageBackendSpec_builder{
+					Credentials: privatev1.StorageBackendCredentials_builder{
+						Username: "admin",
+						PasswordSecret: privatev1.SecretLocalReference_builder{
+							Id: "my-secret-id",
+						}.Build(),
+					}.Build(),
+				}.Build(),
+			}.Build(),
+			UpdateMask: &fieldmaskpb.FieldMask{
+				Paths: []string{"spec.credentials.password", "spec.credentials.password_secret"},
+			},
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		ref := updateResponse.GetObject().GetSpec().GetCredentials().GetPasswordSecret()
+		Expect(ref.GetId()).To(Equal("my-secret-id"))
+		Expect(ref.GetName()).To(Equal("my-secret-name"))
+	})
+
+	It("Rejects an update that adds password_secret while inline password remains", func() {
+		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			Password: "secret",
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = server.Update(ctx, privatev1.StorageBackendsUpdateRequest_builder{
+			Object: privatev1.StorageBackend_builder{
+				Id: created.GetObject().GetId(),
+				Spec: privatev1.StorageBackendSpec_builder{
+					Credentials: privatev1.StorageBackendCredentials_builder{
+						Username: "admin",
+						PasswordSecret: privatev1.SecretLocalReference_builder{
+							Id: "my-secret-id",
+						}.Build(),
+					}.Build(),
+				}.Build(),
+			}.Build(),
+			UpdateMask: &fieldmaskpb.FieldMask{
+				Paths: []string{"spec.credentials.password_secret"},
+			},
+		}.Build())
+		Expect(err).To(HaveOccurred())
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+	})
+
+	It("Rejects an update with both password and password_secret set", func() {
+		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			Password: "secret",
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = server.Update(ctx, privatev1.StorageBackendsUpdateRequest_builder{
+			Object: privatev1.StorageBackend_builder{
+				Id: created.GetObject().GetId(),
+				Spec: privatev1.StorageBackendSpec_builder{
+					Credentials: privatev1.StorageBackendCredentials_builder{
+						Username: "admin",
+						Password: "other-secret",
+						PasswordSecret: privatev1.SecretLocalReference_builder{
+							Id: "my-secret-id",
+						}.Build(),
+					}.Build(),
+				}.Build(),
+			}.Build(),
+		}.Build())
+		Expect(err).To(HaveOccurred())
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("mutually exclusive"))
+	})
+
+	It("Rejects a masked update that clears both password and password_secret", func() {
+		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
+			Username: "admin",
+			Password: "secret",
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = server.Update(ctx, privatev1.StorageBackendsUpdateRequest_builder{
+			Object: privatev1.StorageBackend_builder{
+				Id: created.GetObject().GetId(),
+				Spec: privatev1.StorageBackendSpec_builder{
+					Credentials: privatev1.StorageBackendCredentials_builder{
+						Username: "admin",
+					}.Build(),
+				}.Build(),
+			}.Build(),
+			UpdateMask: &fieldmaskpb.FieldMask{
+				Paths: []string{"spec.credentials.password", "spec.credentials.password_secret"},
+			},
+		}.Build())
+		Expect(err).To(HaveOccurred())
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
+		Expect(err.Error()).To(ContainSubstring("exactly one of password or password_secret must be set"))
 	})
 })

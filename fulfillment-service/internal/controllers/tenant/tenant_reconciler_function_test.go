@@ -21,6 +21,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/grpc"
+	grpccodes "google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
@@ -29,6 +32,45 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/idp"
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 )
+
+type mockSecretsClient struct {
+	getFunc    func(ctx context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error)
+	createFunc func(ctx context.Context, req *privatev1.SecretsCreateRequest) (*privatev1.SecretsCreateResponse, error)
+	listFunc   func(ctx context.Context, req *privatev1.SecretsListRequest) (*privatev1.SecretsListResponse, error)
+}
+
+func (m *mockSecretsClient) Get(ctx context.Context, req *privatev1.SecretsGetRequest, _ ...grpc.CallOption) (*privatev1.SecretsGetResponse, error) {
+	if m.getFunc != nil {
+		return m.getFunc(ctx, req)
+	}
+	return nil, fmt.Errorf("unexpected Get")
+}
+
+func (m *mockSecretsClient) List(ctx context.Context, req *privatev1.SecretsListRequest, _ ...grpc.CallOption) (*privatev1.SecretsListResponse, error) {
+	if m.listFunc != nil {
+		return m.listFunc(ctx, req)
+	}
+	return nil, fmt.Errorf("unexpected List")
+}
+
+func (m *mockSecretsClient) Create(ctx context.Context, req *privatev1.SecretsCreateRequest, _ ...grpc.CallOption) (*privatev1.SecretsCreateResponse, error) {
+	if m.createFunc != nil {
+		return m.createFunc(ctx, req)
+	}
+	return nil, fmt.Errorf("unexpected Create")
+}
+
+func (m *mockSecretsClient) Update(context.Context, *privatev1.SecretsUpdateRequest, ...grpc.CallOption) (*privatev1.SecretsUpdateResponse, error) {
+	return nil, fmt.Errorf("unexpected Update")
+}
+
+func (m *mockSecretsClient) Delete(context.Context, *privatev1.SecretsDeleteRequest, ...grpc.CallOption) (*privatev1.SecretsDeleteResponse, error) {
+	return nil, fmt.Errorf("unexpected Delete")
+}
+
+func (m *mockSecretsClient) Signal(context.Context, *privatev1.SecretsSignalRequest, ...grpc.CallOption) (*privatev1.SecretsSignalResponse, error) {
+	return nil, fmt.Errorf("unexpected Signal")
+}
 
 var _ = Describe("Tenant Validation", func() {
 	It("should succeed with a tenant assigned", func() {
@@ -591,6 +633,338 @@ var _ = Describe("IDP Sync", func() {
 		Expect(tenant.GetStatus().GetState()).To(
 			Equal(privatev1.TenantState_TENANT_STATE_SYNCED),
 		)
+	})
+})
+
+var _ = Describe("Break-glass credentials secret resolution", func() {
+	var (
+		ctx        context.Context
+		ctrl       *gomock.Controller
+		mockClient *idp.MockClientInterface
+		idpManager *idp.TenantManager
+		reconciler *function
+	)
+
+	BeforeEach(func() {
+		var err error
+		ctx = context.Background()
+		ctrl = gomock.NewController(GinkgoT())
+		mockClient = idp.NewMockClientInterface(ctrl)
+
+		idpManager, err = idp.NewTenantManager().
+			SetLogger(logger).
+			SetClient(mockClient).
+			Build()
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("should resolve the password from the referenced Secret", func() {
+		secrets := &mockSecretsClient{
+			getFunc: func(_ context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error) {
+				Expect(req.GetId()).To(Equal("secret-id"))
+				return privatev1.SecretsGetResponse_builder{
+					Object: privatev1.Secret_builder{
+						Id: "secret-id",
+						Data: map[string][]byte{
+							"username": []byte("test-org-osac-break-glass"),
+							"password": []byte("from-secret"),
+						},
+					}.Build(),
+				}.Build(), nil
+			},
+		}
+		reconciler = &function{
+			logger:        logger,
+			idpManager:    idpManager,
+			secretsClient: secrets,
+		}
+
+		tenant := privatev1.Tenant_builder{
+			Id: "org-123",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "test-org",
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     "tenant-1",
+			}.Build(),
+			Spec: privatev1.TenantSpec_builder{
+				BreakGlassCredentialsSecret: privatev1.SecretLocalReference_builder{
+					Id:   "secret-id",
+					Name: "break-glass-credentials",
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		mockClient.EXPECT().
+			CreateTenant(gomock.Any(), gomock.Any()).
+			Return(&idp.Tenant{Name: "test-org", Enabled: true}, nil)
+		mockClient.EXPECT().
+			CreateUser(gomock.Any(), "test-org", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, user *idp.User) (*idp.User, error) {
+				Expect(user.Credentials).To(HaveLen(1))
+				Expect(user.Credentials[0].Value).To(Equal("from-secret"))
+				user.ID = "user-123"
+				return user, nil
+			})
+		mockClient.EXPECT().
+			AssignIdpManagerPermissions(gomock.Any(), "user-123").
+			Return(nil)
+
+		task := &task{r: reconciler, tenant: tenant}
+		Expect(task.update(ctx)).To(Succeed())
+		Expect(tenant.GetStatus().GetBreakGlassUserId()).To(Equal("user-123"))
+	})
+
+	It("should prefer inline status credentials over the Secret reference", func() {
+		reconciler = &function{
+			logger:     logger,
+			idpManager: idpManager,
+			secretsClient: &mockSecretsClient{
+				getFunc: func(context.Context, *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error) {
+					Fail("Secrets.Get should not be called when status credentials are present")
+					return nil, nil
+				},
+			},
+		}
+
+		tenant := privatev1.Tenant_builder{
+			Id: "org-123",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "test-org",
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     "tenant-1",
+			}.Build(),
+			Spec: privatev1.TenantSpec_builder{
+				BreakGlassCredentialsSecret: privatev1.SecretLocalReference_builder{
+					Id: "secret-id",
+				}.Build(),
+			}.Build(),
+			Status: privatev1.TenantStatus_builder{
+				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
+					Username: "test-org-osac-break-glass",
+					Password: "inline-password",
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		mockClient.EXPECT().
+			CreateTenant(gomock.Any(), gomock.Any()).
+			Return(&idp.Tenant{Name: "test-org", Enabled: true}, nil)
+		mockClient.EXPECT().
+			CreateUser(gomock.Any(), "test-org", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, user *idp.User) (*idp.User, error) {
+				Expect(user.Credentials[0].Value).To(Equal("inline-password"))
+				user.ID = "user-123"
+				return user, nil
+			})
+		mockClient.EXPECT().
+			AssignIdpManagerPermissions(gomock.Any(), "user-123").
+			Return(nil)
+
+		task := &task{r: reconciler, tenant: tenant}
+		Expect(task.update(ctx)).To(Succeed())
+	})
+
+	It("should return an error when the Secret is missing data[\"password\"]", func() {
+		reconciler = &function{
+			logger:     logger,
+			idpManager: idpManager,
+			secretsClient: &mockSecretsClient{
+				getFunc: func(context.Context, *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error) {
+					return privatev1.SecretsGetResponse_builder{
+						Object: privatev1.Secret_builder{
+							Id:   "secret-id",
+							Data: map[string][]byte{"username": []byte("only-user")},
+						}.Build(),
+					}.Build(), nil
+				},
+			},
+		}
+
+		tenant := privatev1.Tenant_builder{
+			Metadata: privatev1.Metadata_builder{
+				Name:       "test-org",
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     "tenant-1",
+			}.Build(),
+			Spec: privatev1.TenantSpec_builder{
+				BreakGlassCredentialsSecret: privatev1.SecretLocalReference_builder{
+					Id: "secret-id",
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		task := &task{r: reconciler, tenant: tenant}
+		err := task.update(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`missing data["password"]`))
+	})
+
+	It("should store generated credentials as a Secret after IDP sync", func() {
+		secrets := &mockSecretsClient{
+			createFunc: func(_ context.Context, req *privatev1.SecretsCreateRequest) (*privatev1.SecretsCreateResponse, error) {
+				secret := req.GetObject()
+				Expect(secret.GetMetadata().GetName()).To(Equal("break-glass-credentials"))
+				Expect(secret.GetMetadata().GetTenant()).To(Equal("test-org"))
+				Expect(secret.GetData()).To(HaveKeyWithValue("password", []byte("pre-generated-password")))
+				secret.SetId("created-secret-id")
+				return privatev1.SecretsCreateResponse_builder{Object: secret}.Build(), nil
+			},
+		}
+		reconciler = &function{
+			logger:        logger,
+			idpManager:    idpManager,
+			secretsClient: secrets,
+		}
+
+		tenant := privatev1.Tenant_builder{
+			Id: "org-123",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "test-org",
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     "tenant-1",
+			}.Build(),
+			Status: privatev1.TenantStatus_builder{
+				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
+					Username: "test-org-osac-break-glass",
+					Password: "pre-generated-password",
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		mockClient.EXPECT().
+			CreateTenant(gomock.Any(), gomock.Any()).
+			Return(&idp.Tenant{Name: "test-org", Enabled: true}, nil)
+		mockClient.EXPECT().
+			CreateUser(gomock.Any(), "test-org", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, user *idp.User) (*idp.User, error) {
+				user.ID = "user-123"
+				return user, nil
+			})
+		mockClient.EXPECT().
+			AssignIdpManagerPermissions(gomock.Any(), "user-123").
+			Return(nil)
+
+		task := &task{r: reconciler, tenant: tenant}
+		Expect(task.update(ctx)).To(Succeed())
+		ref := tenant.GetSpec().GetBreakGlassCredentialsSecret()
+		Expect(ref).ToNot(BeNil())
+		Expect(ref.GetId()).To(Equal("created-secret-id"))
+		Expect(ref.GetName()).To(Equal("break-glass-credentials"))
+		Expect(tenant.GetStatus().HasBreakGlassCredentials()).To(BeFalse())
+	})
+
+	It("should adopt an existing Secret when Create returns AlreadyExists", func() {
+		secrets := &mockSecretsClient{
+			createFunc: func(context.Context, *privatev1.SecretsCreateRequest) (*privatev1.SecretsCreateResponse, error) {
+				return nil, grpcstatus.Error(grpccodes.AlreadyExists,
+					"secret with name 'break-glass-credentials' already exists")
+			},
+			listFunc: func(_ context.Context, req *privatev1.SecretsListRequest) (*privatev1.SecretsListResponse, error) {
+				Expect(req.GetFilter()).To(ContainSubstring("break-glass-credentials"))
+				Expect(req.GetFilter()).To(ContainSubstring("test-org"))
+				return privatev1.SecretsListResponse_builder{
+					Items: []*privatev1.Secret{
+						privatev1.Secret_builder{
+							Id: "existing-secret-id",
+							Metadata: privatev1.Metadata_builder{
+								Name:   "break-glass-credentials",
+								Tenant: "test-org",
+							}.Build(),
+						}.Build(),
+					},
+				}.Build(), nil
+			},
+		}
+		reconciler = &function{
+			logger:        logger,
+			idpManager:    idpManager,
+			secretsClient: secrets,
+		}
+
+		tenant := privatev1.Tenant_builder{
+			Id: "org-123",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "test-org",
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     "tenant-1",
+			}.Build(),
+			Status: privatev1.TenantStatus_builder{
+				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
+					Username: "test-org-osac-break-glass",
+					Password: "pre-generated-password",
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		mockClient.EXPECT().
+			CreateTenant(gomock.Any(), gomock.Any()).
+			Return(&idp.Tenant{Name: "test-org", Enabled: true}, nil)
+		mockClient.EXPECT().
+			CreateUser(gomock.Any(), "test-org", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, user *idp.User) (*idp.User, error) {
+				user.ID = "user-123"
+				return user, nil
+			})
+		mockClient.EXPECT().
+			AssignIdpManagerPermissions(gomock.Any(), "user-123").
+			Return(nil)
+
+		task := &task{r: reconciler, tenant: tenant}
+		Expect(task.update(ctx)).To(Succeed())
+		ref := tenant.GetSpec().GetBreakGlassCredentialsSecret()
+		Expect(ref).ToNot(BeNil())
+		Expect(ref.GetId()).To(Equal("existing-secret-id"))
+		Expect(ref.GetName()).To(Equal("break-glass-credentials"))
+		Expect(tenant.GetStatus().GetIdpTenantName()).To(Equal("test-org"))
+		Expect(tenant.GetStatus().GetState()).To(Equal(privatev1.TenantState_TENANT_STATE_SYNCED))
+	})
+
+	It("should keep idpTenantName when persist fails so CreateTenant is not retried", func() {
+		secrets := &mockSecretsClient{
+			createFunc: func(context.Context, *privatev1.SecretsCreateRequest) (*privatev1.SecretsCreateResponse, error) {
+				return nil, fmt.Errorf("secrets service unavailable")
+			},
+		}
+		reconciler = &function{
+			logger:        logger,
+			idpManager:    idpManager,
+			secretsClient: secrets,
+		}
+
+		tenant := privatev1.Tenant_builder{
+			Id: "org-123",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "test-org",
+				Finalizers: []string{finalizers.Controller},
+				Tenant:     "tenant-1",
+			}.Build(),
+			Status: privatev1.TenantStatus_builder{
+				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
+					Username: "test-org-osac-break-glass",
+					Password: "pre-generated-password",
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		mockClient.EXPECT().
+			CreateTenant(gomock.Any(), gomock.Any()).
+			Return(&idp.Tenant{Name: "test-org", Enabled: true}, nil)
+		mockClient.EXPECT().
+			CreateUser(gomock.Any(), "test-org", gomock.Any()).
+			DoAndReturn(func(_ context.Context, _ string, user *idp.User) (*idp.User, error) {
+				user.ID = "user-123"
+				return user, nil
+			})
+		mockClient.EXPECT().
+			AssignIdpManagerPermissions(gomock.Any(), "user-123").
+			Return(nil)
+
+		task := &task{r: reconciler, tenant: tenant}
+		Expect(task.update(ctx)).To(Succeed())
+		Expect(tenant.GetStatus().GetIdpTenantName()).To(Equal("test-org"))
+		Expect(tenant.GetStatus().GetBreakGlassUserId()).To(Equal("user-123"))
+		Expect(tenant.GetStatus().GetState()).To(Equal(privatev1.TenantState_TENANT_STATE_PENDING))
+		Expect(tenant.GetSpec().GetBreakGlassCredentialsSecret()).To(BeNil())
 	})
 })
 

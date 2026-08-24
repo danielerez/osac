@@ -20,6 +20,7 @@ import "google/protobuf/timestamp.proto";
 import "osac/private/v1/condition_status_type.proto";
 import "osac/private/v1/metadata_type.proto";
 import "osac/private/v1/break_glass_credentials_type.proto";
+import "osac/private/v1/secret_type.proto";
 
 message Tenant {
   string id = 1;
@@ -70,6 +71,14 @@ message TenantSpec {
       ]
     }
   }];
+
+  // Reference to a Secret resource containing break-glass account credentials.
+  //
+  // On Create the system generates break-glass credentials and returns them in status. The
+  // reconciler then stores them as a Secret and sets this field. Callers may also set it to an
+  // existing Secret; the referenced Secret must exist. The secret data must contain `username` and
+  // `password` entries.
+  SecretLocalReference break_glass_credentials_secret = 2;
 }
 
 // Represents the current operational state of a Tenant.
@@ -79,7 +88,8 @@ message TenantSpec {
 message TenantStatus {
   // Break-glass account credentials.
   // Only populated on successful creation. These credentials must be stored securely.
-  // This field is not persisted and will be empty when reading existing tenants.
+  // This field is not persisted; Get and List responses omit it. The durable copy is the
+  // Secret referenced by spec.break_glass_credentials_secret.
   BreakGlassCredentials break_glass_credentials = 1;
 
   // Current lifecycle state of the tenant's IDP synchronization.

@@ -30,6 +30,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
+	"github.com/osac-project/osac/fulfillment-service/internal/references"
 )
 
 type PrivateTenantsServerBuilder struct {
@@ -49,6 +50,7 @@ type PrivateTenantsServer struct {
 	logger            *slog.Logger
 	generic           *GenericServer[*privatev1.Tenant]
 	dao               *dao.GenericDAO[*privatev1.Tenant]
+	secretsDao        *dao.GenericDAO[*privatev1.Secret]
 	defaultNetworking *DefaultNetworkingProvisioner
 }
 
@@ -122,9 +124,18 @@ func (b *PrivateTenantsServerBuilder) Build() (result *PrivateTenantsServer, err
 	}
 
 	// Create the DAO:
-	dao, err := dao.NewGenericDAO[*privatev1.Tenant]().
+	tenantsDao, err := dao.NewGenericDAO[*privatev1.Tenant]().
 		SetLogger(b.logger).
 		SetTableName("tenants").
+		SetTenancyLogic(b.tenancyLogic).
+		SetMetricsRegisterer(b.metricsRegisterer).
+		Build()
+	if err != nil {
+		return
+	}
+
+	secretsDao, err := dao.NewGenericDAO[*privatev1.Secret]().
+		SetLogger(b.logger).
 		SetTenancyLogic(b.tenancyLogic).
 		SetMetricsRegisterer(b.metricsRegisterer).
 		Build()
@@ -136,7 +147,8 @@ func (b *PrivateTenantsServerBuilder) Build() (result *PrivateTenantsServer, err
 	result = &PrivateTenantsServer{
 		logger:            b.logger,
 		generic:           generic,
-		dao:               dao,
+		dao:               tenantsDao,
+		secretsDao:        secretsDao,
 		defaultNetworking: b.defaultNetworking,
 	}
 	return
@@ -195,23 +207,27 @@ func (s *PrivateTenantsServer) Create(ctx context.Context,
 		metadata.SetTenant(name)
 	}
 
-	// Generate break-glass credentials so they are persisted temporarily and
-	// returned in the Create response. The reconciler will read the password
-	// when creating the Keycloak account and then clear it from the database.
-	password, genErr := generatePassword()
-	if genErr != nil {
-		err = grpcstatus.Errorf(grpccodes.Internal, "failed to generate break-glass password: %v", genErr)
+	if err = s.validateBreakGlassCredentialsSecret(ctx, object); err != nil {
 		return
 	}
-	if !object.HasStatus() {
-		object.SetStatus(&privatev1.TenantStatus{})
-	}
-	object.GetStatus().SetBreakGlassCredentials(
-		privatev1.BreakGlassCredentials_builder{
+
+	// Only generate break-glass credentials when the caller did NOT supply a secret reference.
+	// When a reference is provided the reconciler reads the password from the Secret directly.
+	if object.GetSpec().GetBreakGlassCredentialsSecret() == nil {
+		password, genErr := generatePassword()
+		if genErr != nil {
+			err = grpcstatus.Errorf(grpccodes.Internal, "failed to generate break-glass password: %v", genErr)
+			return
+		}
+		if !object.HasStatus() {
+			object.SetStatus(&privatev1.TenantStatus{})
+		}
+		creds := privatev1.BreakGlassCredentials_builder{
 			Username: fmt.Sprintf("%s-osac-break-glass", name),
 			Password: password,
-		}.Build(),
-	)
+		}.Build()
+		object.GetStatus().SetBreakGlassCredentials(creds)
+	}
 
 	// Domain validation is now handled by protovalidate in the interceptor
 	// Delegate to the generic server:
@@ -236,6 +252,9 @@ func (s *PrivateTenantsServer) Create(ctx context.Context,
 
 func (s *PrivateTenantsServer) Update(ctx context.Context,
 	request *privatev1.TenantsUpdateRequest) (response *privatev1.TenantsUpdateResponse, err error) {
+	if err = s.validateBreakGlassCredentialsSecret(ctx, request.GetObject()); err != nil {
+		return
+	}
 	// Domain validation is now handled by protovalidate after update_mask merge in generic server
 	// Delegate to the generic server:
 	err = s.generic.Update(ctx, request, &response)
@@ -247,7 +266,14 @@ func (s *PrivateTenantsServer) Update(ctx context.Context,
 
 func (s *PrivateTenantsServer) Delete(ctx context.Context,
 	request *privatev1.TenantsDeleteRequest) (response *privatev1.TenantsDeleteResponse, err error) {
+	getResponse, getErr := s.dao.Get().SetId(request.GetId()).Do(ctx)
 	err = s.generic.Delete(ctx, request, &response)
+	if err != nil {
+		return
+	}
+	if getErr == nil {
+		s.deleteBreakGlassSecret(ctx, getResponse.GetObject())
+	}
 	return
 }
 
@@ -275,6 +301,53 @@ func stripBreakGlassCredentials(tenant *privatev1.Tenant) {
 	if tenant.HasStatus() && tenant.GetStatus().HasBreakGlassCredentials() {
 		tenant.GetStatus().ClearBreakGlassCredentials()
 	}
+}
+
+func (s *PrivateTenantsServer) deleteBreakGlassSecret(ctx context.Context, tenant *privatev1.Tenant) {
+	ref := tenant.GetSpec().GetBreakGlassCredentialsSecret()
+	if ref == nil || ref.GetId() == "" {
+		return
+	}
+	if _, err := s.secretsDao.Delete().SetId(ref.GetId()).Do(ctx); err != nil {
+		s.logger.ErrorContext(ctx, "Failed to delete break-glass credentials secret",
+			slog.String("tenant", tenant.GetMetadata().GetName()),
+			slog.String("secret_id", ref.GetId()),
+			slog.Any("error", err))
+	}
+}
+
+func (s *PrivateTenantsServer) validateBreakGlassCredentialsSecret(ctx context.Context,
+	tenant *privatev1.Tenant) error {
+	ref := tenant.GetSpec().GetBreakGlassCredentialsSecret()
+	if ref == nil {
+		return nil
+	}
+	if ref.GetId() == "" && ref.GetName() == "" {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"break_glass_credentials_secret must specify id or name")
+	}
+	resolved, err := references.NewDAOLookupFunc(s.secretsDao)(ctx, "", "", ref.GetId(), ref.GetName())
+	if err != nil {
+		var deniedErr *dao.ErrDenied
+		if errors.As(err, &deniedErr) {
+			return grpcstatus.Errorf(grpccodes.PermissionDenied, "%s", deniedErr.Reason)
+		}
+		var nf interface{ IsNotFound() bool }
+		if errors.As(err, &nf) && nf.IsNotFound() {
+			return grpcstatus.Errorf(grpccodes.InvalidArgument,
+				"there is no secret with identifier or name '%s'", refKey(ref))
+		}
+		s.logger.ErrorContext(ctx, "Failed to resolve break_glass_credentials_secret reference", "error", err)
+		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve break_glass_credentials_secret reference")
+	}
+	resolvedRef := &privatev1.SecretLocalReference{}
+	resolvedRef.SetId(resolved.ID)
+	resolvedRef.SetName(resolved.Name)
+	if !tenant.HasSpec() {
+		tenant.SetSpec(&privatev1.TenantSpec{})
+	}
+	tenant.GetSpec().SetBreakGlassCredentialsSecret(resolvedRef)
+	return nil
 }
 
 // Domain validation has been migrated to protovalidate constraints in tenant_type.proto.

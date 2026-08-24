@@ -18,6 +18,7 @@ package osac.private.v1;
 import "buf/validate/validate.proto";
 import "cleanapi/cleanapi.proto";
 import "osac/private/v1/metadata_type.proto";
+import "osac/private/v1/secret_type.proto";
 
 option (cleanapi.file).private = true;
 
@@ -61,11 +62,25 @@ message StorageBackendSpec {
 
 // Credentials for authenticating with a storage backend's management API.
 message StorageBackendCredentials {
+  option (buf.validate.message).cel = {
+    id: "password_xor_password_secret"
+    message: "exactly one of password or password_secret must be set"
+    expression: "(this.password != '') != has(this.password_secret)"
+  };
+
   // Username for storage management API authentication.
   string username = 1 [(buf.validate.field).string.min_len = 1];
 
   // Password for storage management API authentication.
-  string password = 2 [(buf.validate.field).string.min_len = 1];
+  // Mutually exclusive with `password_secret`.
+  string password = 2;
+
+  // Reference to a Secret resource containing the storage management API password.
+  //
+  // Mutually exclusive with `password`. When set, the system resolves the referenced Secret to obtain the
+  // password value. The referenced Secret must exist in the same tenant. The secret data must contain a
+  // `password` entry.
+  SecretLocalReference password_secret = 3;
 }
 
 // Represents the current operational state of a StorageBackend.

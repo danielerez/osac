@@ -15,6 +15,7 @@ package identityprovider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -56,6 +57,35 @@ func (m *mockIdentityProvidersClient) Delete(ctx context.Context, req *privatev1
 }
 
 func (m *mockIdentityProvidersClient) Signal(ctx context.Context, req *privatev1.IdentityProvidersSignalRequest, _ ...grpc.CallOption) (*privatev1.IdentityProvidersSignalResponse, error) {
+	return nil, nil
+}
+
+// mockSecretsClient is a minimal mock for testing secret-reference resolution.
+type mockSecretsClient struct {
+	getFunc func(ctx context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error)
+}
+
+func (m *mockSecretsClient) Get(ctx context.Context, req *privatev1.SecretsGetRequest, _ ...grpc.CallOption) (*privatev1.SecretsGetResponse, error) {
+	return m.getFunc(ctx, req)
+}
+
+func (m *mockSecretsClient) List(ctx context.Context, req *privatev1.SecretsListRequest, _ ...grpc.CallOption) (*privatev1.SecretsListResponse, error) {
+	return nil, nil
+}
+
+func (m *mockSecretsClient) Create(ctx context.Context, req *privatev1.SecretsCreateRequest, _ ...grpc.CallOption) (*privatev1.SecretsCreateResponse, error) {
+	return nil, nil
+}
+
+func (m *mockSecretsClient) Update(ctx context.Context, req *privatev1.SecretsUpdateRequest, _ ...grpc.CallOption) (*privatev1.SecretsUpdateResponse, error) {
+	return nil, nil
+}
+
+func (m *mockSecretsClient) Delete(ctx context.Context, req *privatev1.SecretsDeleteRequest, _ ...grpc.CallOption) (*privatev1.SecretsDeleteResponse, error) {
+	return nil, nil
+}
+
+func (m *mockSecretsClient) Signal(ctx context.Context, req *privatev1.SecretsSignalRequest, _ ...grpc.CallOption) (*privatev1.SecretsSignalResponse, error) {
 	return nil, nil
 }
 
@@ -292,7 +322,7 @@ var _ = Describe("Config Building", func() {
 			identityProvider: identityProvider,
 		}
 
-		config := task.buildConfigFromIdp(identityProvider)
+		config := task.buildConfigFromIdp(identityProvider, "secret-456")
 		Expect(config).To(HaveKeyWithValue("authorizationUrl", "https://example.com/auth"))
 		Expect(config).To(HaveKeyWithValue("tokenUrl", "https://example.com/token"))
 		Expect(config).To(HaveKeyWithValue("clientId", "client-123"))
@@ -309,7 +339,7 @@ var _ = Describe("Config Building", func() {
 			identityProvider: identityProvider,
 		}
 
-		config := task.buildConfigFromIdp(identityProvider)
+		config := task.buildConfigFromIdp(identityProvider, "")
 		Expect(config).To(BeEmpty())
 	})
 })
@@ -593,6 +623,212 @@ var _ = Describe("IDP Sync", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(identityProvider.GetStatus().GetPhase()).To(Equal(privatev1.IdentityProviderPhase_IDENTITY_PROVIDER_PHASE_READY))
+	})
+})
+
+var _ = Describe("Client secret secret resolution", func() {
+	var (
+		ctrl       *gomock.Controller
+		mockClient *idp.MockClientInterface
+		reconciler *function
+	)
+
+	BeforeEach(func() {
+		ctrl = gomock.NewController(GinkgoT())
+		mockClient = idp.NewMockClientInterface(ctrl)
+		reconciler = &function{
+			logger:    logger,
+			idpClient: mockClient,
+		}
+	})
+
+	AfterEach(func() {
+		ctrl.Finish()
+	})
+
+	It("resolves client_secret_secret via the Secrets API", func() {
+		identityProvider := privatev1.IdentityProvider_builder{
+			Id: "idp-secret-ref",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "oidc-provider",
+				Tenant:     "tenant-1",
+				Finalizers: []string{finalizers.Controller},
+			}.Build(),
+			Spec: privatev1.IdentityProviderSpec_builder{
+				Title:   "OIDC Provider",
+				Enabled: true,
+				Oidc: privatev1.OidcConfig_builder{
+					AuthorizationUrl: "https://auth.example.com/authorize",
+					TokenUrl:         "https://auth.example.com/token",
+					ClientId:         "client-xyz",
+					Issuer:           "https://auth.example.com",
+					ClientSecretSecret: privatev1.SecretLocalReference_builder{
+						Id:   "my-secret-id",
+						Name: "my-secret-name",
+					}.Build(),
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		reconciler.secretsClient = &mockSecretsClient{
+			getFunc: func(ctx context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error) {
+				Expect(req.GetId()).To(Equal("my-secret-id"))
+				return privatev1.SecretsGetResponse_builder{
+					Object: privatev1.Secret_builder{
+						Id: "my-secret-id",
+						Data: map[string][]byte{
+							"value": []byte("resolved-from-vault"),
+						},
+					}.Build(),
+				}.Build(), nil
+			},
+		}
+
+		mockClient.EXPECT().
+			CreateIdentityProvider(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, tenantName string, idpProvider *idp.IdentityProvider) (*idp.IdentityProvider, error) {
+				Expect(idpProvider.Config).To(HaveKeyWithValue("clientSecret", "resolved-from-vault"))
+				return idpProvider, nil
+			}).
+			Times(1)
+
+		task := &task{
+			r:                reconciler,
+			identityProvider: identityProvider,
+		}
+
+		err := task.update(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(identityProvider.GetStatus().GetPhase()).To(Equal(privatev1.IdentityProviderPhase_IDENTITY_PROVIDER_PHASE_READY))
+	})
+
+	It("falls back to inline client_secret when client_secret_secret is not set", func() {
+		identityProvider := privatev1.IdentityProvider_builder{
+			Id: "idp-inline",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "oidc-provider",
+				Tenant:     "tenant-1",
+				Finalizers: []string{finalizers.Controller},
+			}.Build(),
+			Spec: privatev1.IdentityProviderSpec_builder{
+				Title:   "OIDC Provider",
+				Enabled: true,
+				Oidc: privatev1.OidcConfig_builder{
+					AuthorizationUrl: "https://auth.example.com/authorize",
+					TokenUrl:         "https://auth.example.com/token",
+					ClientId:         "client-xyz",
+					ClientSecret:     "inline-secret",
+					Issuer:           "https://auth.example.com",
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		mockClient.EXPECT().
+			CreateIdentityProvider(gomock.Any(), gomock.Any(), gomock.Any()).
+			DoAndReturn(func(ctx context.Context, tenantName string, idpProvider *idp.IdentityProvider) (*idp.IdentityProvider, error) {
+				Expect(idpProvider.Config).To(HaveKeyWithValue("clientSecret", "inline-secret"))
+				return idpProvider, nil
+			}).
+			Times(1)
+
+		task := &task{
+			r:                reconciler,
+			identityProvider: identityProvider,
+		}
+
+		err := task.update(ctx)
+		Expect(err).ToNot(HaveOccurred())
+	})
+
+	It("sets ERROR phase when the referenced secret is missing data[\"value\"]", func() {
+		identityProvider := privatev1.IdentityProvider_builder{
+			Id: "idp-bad-secret",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "oidc-provider",
+				Tenant:     "tenant-1",
+				Finalizers: []string{finalizers.Controller},
+			}.Build(),
+			Spec: privatev1.IdentityProviderSpec_builder{
+				Title:   "OIDC Provider",
+				Enabled: true,
+				Oidc: privatev1.OidcConfig_builder{
+					AuthorizationUrl: "https://auth.example.com/authorize",
+					TokenUrl:         "https://auth.example.com/token",
+					ClientId:         "client-xyz",
+					Issuer:           "https://auth.example.com",
+					ClientSecretSecret: privatev1.SecretLocalReference_builder{
+						Id: "my-secret-id",
+					}.Build(),
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		reconciler.secretsClient = &mockSecretsClient{
+			getFunc: func(ctx context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error) {
+				return privatev1.SecretsGetResponse_builder{
+					Object: privatev1.Secret_builder{
+						Id: "my-secret-id",
+						Data: map[string][]byte{
+							"other": []byte("not-the-value"),
+						},
+					}.Build(),
+				}.Build(), nil
+			},
+		}
+
+		task := &task{
+			r:                reconciler,
+			identityProvider: identityProvider,
+		}
+
+		// A resolution failure is surfaced via an ERROR status (consistent with the IDP creation
+		// error path) rather than a returned error, so the status is persisted by the caller.
+		err := task.update(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(identityProvider.GetStatus().GetPhase()).
+			To(Equal(privatev1.IdentityProviderPhase_IDENTITY_PROVIDER_PHASE_ERROR))
+		Expect(identityProvider.GetStatus().GetMessage()).To(ContainSubstring(`missing data["value"]`))
+	})
+
+	It("sets ERROR phase when the Secrets API fetch fails", func() {
+		identityProvider := privatev1.IdentityProvider_builder{
+			Id: "idp-fetch-error",
+			Metadata: privatev1.Metadata_builder{
+				Name:       "oidc-provider",
+				Tenant:     "tenant-1",
+				Finalizers: []string{finalizers.Controller},
+			}.Build(),
+			Spec: privatev1.IdentityProviderSpec_builder{
+				Title:   "OIDC Provider",
+				Enabled: true,
+				Oidc: privatev1.OidcConfig_builder{
+					AuthorizationUrl: "https://auth.example.com/authorize",
+					TokenUrl:         "https://auth.example.com/token",
+					ClientId:         "client-xyz",
+					Issuer:           "https://auth.example.com",
+					ClientSecretSecret: privatev1.SecretLocalReference_builder{
+						Id: "my-secret-id",
+					}.Build(),
+				}.Build(),
+			}.Build(),
+		}.Build()
+
+		reconciler.secretsClient = &mockSecretsClient{
+			getFunc: func(ctx context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error) {
+				return nil, errors.New("secrets API unavailable")
+			},
+		}
+
+		task := &task{
+			r:                reconciler,
+			identityProvider: identityProvider,
+		}
+
+		err := task.update(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(identityProvider.GetStatus().GetPhase()).
+			To(Equal(privatev1.IdentityProviderPhase_IDENTITY_PROVIDER_PHASE_ERROR))
+		Expect(identityProvider.GetStatus().GetMessage()).To(ContainSubstring("secrets API unavailable"))
 	})
 })
 

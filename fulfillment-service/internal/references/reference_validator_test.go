@@ -592,6 +592,17 @@ var _ = Describe("Reference validator", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
+		It("Reports whether a lookup is registered", func() {
+			Expect(validator.HasLookup("osac.tests.v1.TestTargetReference")).To(BeFalse())
+			validator.Register("osac.tests.v1.TestTargetReference", func(
+				ctx context.Context, tenant, project, id, name string,
+			) (*ResolvedRef, error) {
+				return &ResolvedRef{ID: id, Tenant: tenant, Project: project, Name: name}, nil
+			})
+			Expect(validator.HasLookup("osac.tests.v1.TestTargetReference")).To(BeTrue())
+			Expect(validator.HasLookup("osac.tests.v1.TestTargetLocalReference")).To(BeFalse())
+		})
+
 		It("Calls registered lookup function with correct arguments", func() {
 			var capturedTenant, capturedProject, capturedID, capturedName string
 			validator.Register("osac.tests.v1.TestTargetReference", func(

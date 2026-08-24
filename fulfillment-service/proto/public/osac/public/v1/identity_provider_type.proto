@@ -17,6 +17,7 @@ package osac.public.v1;
 
 import "google/protobuf/timestamp.proto";
 import "osac/public/v1/metadata_type.proto";
+import "osac/public/v1/secret_type.proto";
 
 // IdentityProvider represents an external identity provider configuration.
 // Identity providers enable users to authenticate using their existing corporate credentials
@@ -80,6 +81,7 @@ message OidcConfig {
 
   // Client secret for authenticating with the OIDC provider.
   // This field is write-only and will never be returned in API responses.
+  // Mutually exclusive with `client_secret_secret`.
   string client_secret = 4;
 
   // Issuer URL that identifies the OIDC provider.
@@ -109,6 +111,13 @@ message OidcConfig {
   // Logout URL where users are redirected after logging out.
   // Example: "https://accounts.google.com/logout"
   optional string logout_url = 10;
+
+  // Reference to a Secret resource containing the OIDC client secret.
+  //
+  // Mutually exclusive with `client_secret`. When set, the system resolves the referenced Secret to obtain the
+  // client secret value. The referenced Secret must exist in the same tenant. The secret data must contain a `value`
+  // entry.
+  SecretLocalReference client_secret_secret = 11;
 }
 
 // IdentityProviderPhase represents the current phase of an identity provider.

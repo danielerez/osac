@@ -19,12 +19,15 @@ import (
 	"log/slog"
 
 	"github.com/prometheus/client_golang/prometheus"
+	grpccodes "google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
+	"github.com/osac-project/osac/fulfillment-service/internal/references"
 )
 
 type PrivateIdentityProvidersServerBuilder struct {
@@ -40,9 +43,10 @@ var _ privatev1.IdentityProvidersServer = (*PrivateIdentityProvidersServer)(nil)
 
 type PrivateIdentityProvidersServer struct {
 	privatev1.UnimplementedIdentityProvidersServer
-	logger  *slog.Logger
-	generic *GenericServer[*privatev1.IdentityProvider]
-	dao     *dao.GenericDAO[*privatev1.IdentityProvider]
+	logger     *slog.Logger
+	generic    *GenericServer[*privatev1.IdentityProvider]
+	dao        *dao.GenericDAO[*privatev1.IdentityProvider]
+	secretsDao *dao.GenericDAO[*privatev1.Secret]
 }
 
 func NewPrivateIdentityProvidersServer() *PrivateIdentityProvidersServerBuilder {
@@ -122,6 +126,15 @@ func (b *PrivateIdentityProvidersServerBuilder) Build() (result *PrivateIdentity
 		return
 	}
 
+	s.secretsDao, err = dao.NewGenericDAO[*privatev1.Secret]().
+		SetLogger(b.logger).
+		SetTenancyLogic(b.tenancyLogic).
+		SetMetricsRegisterer(b.metricsRegisterer).
+		Build()
+	if err != nil {
+		return
+	}
+
 	// Return the server:
 	result = s
 	return
@@ -142,6 +155,12 @@ func (s *PrivateIdentityProvidersServer) redact(
 
 func (s *PrivateIdentityProvidersServer) Create(ctx context.Context,
 	request *privatev1.IdentityProvidersCreateRequest) (response *privatev1.IdentityProvidersCreateResponse, err error) {
+	if err = s.validateClientSecretMutualExclusion(request.GetObject()); err != nil {
+		return
+	}
+	if err = s.validateClientSecretSecret(ctx, request.GetObject()); err != nil {
+		return
+	}
 	err = s.generic.Create(ctx, request, &response)
 	return
 }
@@ -160,6 +179,12 @@ func (s *PrivateIdentityProvidersServer) Get(ctx context.Context,
 
 func (s *PrivateIdentityProvidersServer) Update(ctx context.Context,
 	request *privatev1.IdentityProvidersUpdateRequest) (response *privatev1.IdentityProvidersUpdateResponse, err error) {
+	if err = s.validateClientSecretMutualExclusionForUpdate(ctx, request); err != nil {
+		return
+	}
+	if err = s.validateClientSecretSecret(ctx, request.GetObject()); err != nil {
+		return
+	}
 	err = s.generic.Update(ctx, request, &response)
 	return
 }
@@ -174,4 +199,144 @@ func (s *PrivateIdentityProvidersServer) Signal(ctx context.Context,
 	request *privatev1.IdentityProvidersSignalRequest) (response *privatev1.IdentityProvidersSignalResponse, err error) {
 	err = s.generic.Signal(ctx, request, &response)
 	return
+}
+
+const (
+	clientSecretField       = "spec.oidc.client_secret"
+	clientSecretSecretField = "spec.oidc.client_secret_secret"
+	clientSecretExclusive   = "client_secret and client_secret_secret are mutually exclusive"
+	// secretValueKey is the key in a Secret's data map that holds the client secret value.
+	secretValueKey = "value"
+)
+
+func oidcFrom(idp *privatev1.IdentityProvider) *privatev1.OidcConfig {
+	if idp == nil {
+		return nil
+	}
+	return idp.GetSpec().GetOidc()
+}
+
+// validateClientSecretMutualExclusion rejects specs that set both client_secret and
+// client_secret_secret.
+func (s *PrivateIdentityProvidersServer) validateClientSecretMutualExclusion(
+	idp *privatev1.IdentityProvider) error {
+	oidc := oidcFrom(idp)
+	if oidc == nil {
+		return nil
+	}
+	if oidc.GetClientSecret() != "" && oidc.GetClientSecretSecret() != nil {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, clientSecretExclusive)
+	}
+	return nil
+}
+
+// validateClientSecretMutualExclusionForUpdate checks for client_secret / client_secret_secret
+// conflicts on Update, accounting for the update mask. When only one of the two fields is in the
+// mask, the other retains its DB value, so a conflict can occur even if the request itself looks
+// clean.
+func (s *PrivateIdentityProvidersServer) validateClientSecretMutualExclusionForUpdate(
+	ctx context.Context, request *privatev1.IdentityProvidersUpdateRequest) error {
+	if err := s.validateClientSecretMutualExclusion(request.GetObject()); err != nil {
+		return err
+	}
+
+	mask := request.GetUpdateMask()
+	if mask == nil || len(mask.GetPaths()) == 0 {
+		return nil
+	}
+
+	oidc := oidcFrom(request.GetObject())
+	settingSecretRef := oidc != nil && oidc.GetClientSecretSecret() != nil &&
+		updateIncludesField(mask, clientSecretSecretField)
+	settingInline := oidc != nil && oidc.GetClientSecret() != "" &&
+		updateIncludesField(mask, clientSecretField)
+
+	if !settingSecretRef && !settingInline {
+		return nil
+	}
+
+	existing, found, err := s.getExistingIdentityProvider(ctx, request)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	existingOidc := oidcFrom(existing)
+
+	if settingSecretRef && existingOidc != nil && existingOidc.GetClientSecret() != "" &&
+		!updateIncludesField(mask, clientSecretField) {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, clientSecretExclusive)
+	}
+	if settingInline && existingOidc != nil && existingOidc.GetClientSecretSecret() != nil &&
+		!updateIncludesField(mask, clientSecretSecretField) {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, clientSecretExclusive)
+	}
+	return nil
+}
+
+func (s *PrivateIdentityProvidersServer) validateClientSecretSecret(
+	ctx context.Context, idp *privatev1.IdentityProvider) error {
+	oidc := oidcFrom(idp)
+	if oidc == nil {
+		return nil
+	}
+	ref := oidc.GetClientSecretSecret()
+	if ref == nil {
+		return nil
+	}
+	if ref.GetId() == "" && ref.GetName() == "" {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument, "client_secret_secret must specify id or name")
+	}
+	resolved, err := references.NewDAOLookupFunc(s.secretsDao)(ctx, "", "", ref.GetId(), ref.GetName())
+	if err != nil {
+		var deniedErr *dao.ErrDenied
+		if errors.As(err, &deniedErr) {
+			return grpcstatus.Errorf(grpccodes.PermissionDenied, "%s", deniedErr.Reason)
+		}
+		var nf interface{ IsNotFound() bool }
+		if errors.As(err, &nf) && nf.IsNotFound() {
+			return grpcstatus.Errorf(grpccodes.InvalidArgument,
+				"there is no secret with identifier or name '%s'", refKey(ref))
+		}
+		s.logger.ErrorContext(ctx, "Failed to resolve client_secret_secret reference", "error", err)
+		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve client_secret_secret reference")
+	}
+	// Load the resolved Secret and ensure it carries a non-empty data["value"] entry, as required
+	// by the reconciler that consumes it. Rejecting here surfaces the problem as an INVALID_ARGUMENT
+	// at write time instead of a silent reconcile failure later.
+	secretResp, err := s.secretsDao.Get().SetId(resolved.ID).Do(ctx)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "Failed to load client_secret_secret reference", "error", err)
+		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve client_secret_secret reference")
+	}
+	if value, ok := secretResp.GetObject().GetData()[secretValueKey]; !ok || len(value) == 0 {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"secret '%s' referenced by client_secret_secret must contain a non-empty '%s' entry",
+			refKey(ref), secretValueKey)
+	}
+	resolvedRef := &privatev1.SecretLocalReference{}
+	resolvedRef.SetId(resolved.ID)
+	resolvedRef.SetName(resolved.Name)
+	oidc.SetClientSecretSecret(resolvedRef)
+	return nil
+}
+
+func (s *PrivateIdentityProvidersServer) getExistingIdentityProvider(ctx context.Context,
+	request *privatev1.IdentityProvidersUpdateRequest) (*privatev1.IdentityProvider, bool, error) {
+	object := request.GetObject()
+	if object == nil {
+		return nil, false, nil
+	}
+	id := object.GetId()
+	if id == "" {
+		return nil, false, nil
+	}
+	getResponse, err := s.dao.Get().
+		SetId(id).
+		Do(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	return getResponse.GetObject(), true, nil
 }

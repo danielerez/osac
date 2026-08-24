@@ -623,4 +623,284 @@ var _ = Describe("Private identity providers server", func() {
 			Expect(object.GetSpec().GetOidc().GetClientSecret()).To(BeEmpty())
 		})
 	})
+
+	Describe("Client secret secret reference", func() {
+		var server *PrivateIdentityProvidersServer
+
+		BeforeEach(func() {
+			var err error
+			server, err = NewPrivateIdentityProvidersServer().
+				SetLogger(logger).
+				SetAttributionLogic(attribution).
+				SetTenancyLogic(tenancy).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			secretsDao, err := dao.NewGenericDAO[*privatev1.Secret]().
+				SetLogger(logger).
+				SetTenancyLogic(tenancy).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = secretsDao.Create().SetObject(privatev1.Secret_builder{
+				Id: "my-secret-id",
+				Metadata: privatev1.Metadata_builder{
+					Name:   "my-secret-name",
+					Tenant: testTenant,
+				}.Build(),
+				Data: map[string][]byte{"value": []byte("resolved-secret")},
+			}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Secret that resolves by id/name but carries no usable value entry.
+			_, err = secretsDao.Create().SetObject(privatev1.Secret_builder{
+				Id: "valueless-secret-id",
+				Metadata: privatev1.Metadata_builder{
+					Name:   "valueless-secret-name",
+					Tenant: testTenant,
+				}.Build(),
+			}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		createIdp := func(oidc *privatev1.OidcConfig) (*privatev1.IdentityProvidersCreateResponse, error) {
+			return server.Create(ctx, privatev1.IdentityProvidersCreateRequest_builder{
+				Object: privatev1.IdentityProvider_builder{
+					Metadata: privatev1.Metadata_builder{
+						Name:   "test-oidc",
+						Tenant: "my-tenant",
+					}.Build(),
+					Spec: privatev1.IdentityProviderSpec_builder{
+						Title:   "Test OIDC",
+						Enabled: true,
+						Oidc:    oidc,
+					}.Build(),
+				}.Build(),
+			}.Build())
+		}
+
+		It("Creates an identity provider with client_secret_secret reference by id", func() {
+			response, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "my-secret-id",
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			ref := response.GetObject().GetSpec().GetOidc().GetClientSecretSecret()
+			Expect(ref).ToNot(BeNil())
+			Expect(ref.GetId()).To(Equal("my-secret-id"))
+			Expect(ref.GetName()).To(Equal("my-secret-name"))
+		})
+
+		It("Creates an identity provider with client_secret_secret reference by name", func() {
+			response, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Name: "my-secret-name",
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			ref := response.GetObject().GetSpec().GetOidc().GetClientSecretSecret()
+			Expect(ref.GetId()).To(Equal("my-secret-id"))
+			Expect(ref.GetName()).To(Equal("my-secret-name"))
+		})
+
+		It("Rejects create when client_secret and client_secret_secret are both set", func() {
+			_, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				ClientSecret:     testOidcClientSecret,
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "my-secret-id",
+				}.Build(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("mutually exclusive"))
+		})
+
+		It("Rejects create when client_secret_secret references a non-existent secret", func() {
+			_, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "nonexistent-secret",
+				}.Build(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("no secret"))
+		})
+
+		It("Rejects create when client_secret_secret is empty", func() {
+			_, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl:   "https://example.com/auth",
+				TokenUrl:           "https://example.com/token",
+				ClientId:           "client-id",
+				Issuer:             "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{}.Build(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("must specify id or name"))
+		})
+
+		It("Creates an identity provider with inline client_secret when client_secret_secret is not set", func() {
+			response, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				ClientSecret:     testOidcClientSecret,
+				Issuer:           "https://example.com",
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			Expect(response.GetObject().GetSpec().GetOidc().GetClientSecret()).To(Equal(testOidcClientSecret))
+			Expect(response.GetObject().GetSpec().GetOidc().GetClientSecretSecret()).To(BeNil())
+		})
+
+		It("Updates an identity provider with client_secret_secret reference", func() {
+			createResponse, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+
+			updateMask, err := fieldmaskpb.New(createResponse.GetObject(), "spec.oidc.client_secret_secret")
+			Expect(err).ToNot(HaveOccurred())
+
+			updateResponse, err := server.Update(ctx, privatev1.IdentityProvidersUpdateRequest_builder{
+				Object: privatev1.IdentityProvider_builder{
+					Id: createResponse.GetObject().GetId(),
+					Spec: privatev1.IdentityProviderSpec_builder{
+						Oidc: privatev1.OidcConfig_builder{
+							ClientSecretSecret: privatev1.SecretLocalReference_builder{
+								Id: "my-secret-id",
+							}.Build(),
+						}.Build(),
+					}.Build(),
+				}.Build(),
+				UpdateMask: updateMask,
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			ref := updateResponse.GetObject().GetSpec().GetOidc().GetClientSecretSecret()
+			Expect(ref.GetId()).To(Equal("my-secret-id"))
+			Expect(ref.GetName()).To(Equal("my-secret-name"))
+		})
+
+		It("Rejects update when client_secret_secret conflicts with existing client_secret in DB", func() {
+			createResponse, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				ClientSecret:     testOidcClientSecret,
+				Issuer:           "https://example.com",
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+
+			updateMask, err := fieldmaskpb.New(createResponse.GetObject(), "spec.oidc.client_secret_secret")
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = server.Update(ctx, privatev1.IdentityProvidersUpdateRequest_builder{
+				Object: privatev1.IdentityProvider_builder{
+					Id: createResponse.GetObject().GetId(),
+					Spec: privatev1.IdentityProviderSpec_builder{
+						Oidc: privatev1.OidcConfig_builder{
+							ClientSecretSecret: privatev1.SecretLocalReference_builder{
+								Id: "my-secret-id",
+							}.Build(),
+						}.Build(),
+					}.Build(),
+				}.Build(),
+				UpdateMask: updateMask,
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("mutually exclusive"))
+		})
+
+		It("Rejects update when client_secret and client_secret_secret are both set", func() {
+			createResponse, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = server.Update(ctx, privatev1.IdentityProvidersUpdateRequest_builder{
+				Object: privatev1.IdentityProvider_builder{
+					Id: createResponse.GetObject().GetId(),
+					Spec: privatev1.IdentityProviderSpec_builder{
+						Oidc: privatev1.OidcConfig_builder{
+							ClientSecret: testOidcClientSecret,
+							ClientSecretSecret: privatev1.SecretLocalReference_builder{
+								Id: "my-secret-id",
+							}.Build(),
+						}.Build(),
+					}.Build(),
+				}.Build(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("mutually exclusive"))
+		})
+
+		It("Rejects create when client_secret_secret references a secret without a value entry", func() {
+			_, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "valueless-secret-id",
+				}.Build(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("value"))
+		})
+
+		It("Rejects update when client_secret_secret references a secret without a value entry", func() {
+			createResponse, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+
+			updateMask, err := fieldmaskpb.New(createResponse.GetObject(), "spec.oidc.client_secret_secret")
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = server.Update(ctx, privatev1.IdentityProvidersUpdateRequest_builder{
+				Object: privatev1.IdentityProvider_builder{
+					Id: createResponse.GetObject().GetId(),
+					Spec: privatev1.IdentityProviderSpec_builder{
+						Oidc: privatev1.OidcConfig_builder{
+							ClientSecretSecret: privatev1.SecretLocalReference_builder{
+								Id: "valueless-secret-id",
+							}.Build(),
+						}.Build(),
+					}.Build(),
+				}.Build(),
+				UpdateMask: updateMask,
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("value"))
+		})
+	})
 })

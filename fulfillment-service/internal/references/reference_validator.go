@@ -140,6 +140,12 @@ func (v *ReferenceValidator) Register(fullName protoreflect.FullName, lookupFunc
 	v.registry[fullName] = lookupFunc
 }
 
+// HasLookup reports whether a lookup function is registered for the given reference message type.
+func (v *ReferenceValidator) HasLookup(fullName protoreflect.FullName) bool {
+	_, ok := v.registry[fullName]
+	return ok
+}
+
 // UnaryServer is the unary server interceptor function.
 func (v *ReferenceValidator) UnaryServer(ctx context.Context, request any, info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler) (response any, err error) {

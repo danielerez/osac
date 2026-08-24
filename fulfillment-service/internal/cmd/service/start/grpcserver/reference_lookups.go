@@ -268,5 +268,20 @@ func registerReferenceLookups(
 	references.RegisterDAOLookup(validator, "osac.private.v1.ClusterVersionReference", clusterVersionsDAO)
 	references.RegisterDAOLookup(validator, "osac.public.v1.ClusterVersionReference", clusterVersionsDAO)
 
+	// Secret references. One registration covers every SecretLocalReference field (cluster
+	// pull_secret_secret, hub kubeconfig_secret, cluster template defaults, and identity
+	// provider client_secret_secret). Without this, the interceptor returns Internal
+	// ("no lookup registered") on Create/Update before handlers run.
+	secretsDAO, err := dao.NewGenericDAO[*privatev1.Secret]().
+		SetLogger(logger).
+		SetTenancyLogic(tenancyLogic).
+		SetMetricsRegisterer(metricsRegisterer).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create Secret DAO for reference lookups: %w", err)
+	}
+	references.RegisterDAOLookup(validator, "osac.private.v1.SecretLocalReference", secretsDAO)
+	references.RegisterDAOLookup(validator, "osac.public.v1.SecretLocalReference", secretsDAO)
+
 	return nil
 }

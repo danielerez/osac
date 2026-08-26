@@ -441,6 +441,15 @@ func (t *task) isBuiltin() bool {
 
 // delete performs the deletion cleanup for a tenant.
 func (t *task) delete(ctx context.Context) error {
+	// Remove the break-glass secret first so its project FK does not block
+	// administrators from deleting the default project. Clear the spec ref
+	// afterwards so the follow-up Tenants/Update (finalizer removal) is not
+	// rejected by SecretLocalReference lookup of a secret that no longer exists.
+	if err := t.deleteBreakGlassSecret(ctx); err != nil {
+		return err
+	}
+	t.clearBreakGlassSecretRef()
+
 	// Block until all projects are deleted by the administrator.
 	remaining, err := t.countRemainingProjects(ctx)
 	if err != nil {
@@ -454,48 +463,94 @@ func (t *task) delete(ctx context.Context) error {
 		return fmt.Errorf("tenant still has %d project(s) pending deletion", remaining)
 	}
 
-	// Skip IDP cleanup if not synced to IDP yet, but still clean up vault.
-	if t.tenant.GetStatus().GetState() != privatev1.TenantState_TENANT_STATE_SYNCED {
-		if err := t.deleteVaultNamespace(ctx); err != nil {
-			return err
-		}
-		t.removeFinalizer()
-		return nil
-	}
-
-	// Delete from IDP
-	tenantName := t.tenant.GetStatus().GetIdpTenantName()
-	if tenantName == "" {
-		if err := t.deleteVaultNamespace(ctx); err != nil {
-			return err
-		}
-		t.removeFinalizer()
-		return nil
-	}
-
 	if err := t.deleteVaultNamespace(ctx); err != nil {
 		return err
 	}
 
-	err = t.r.idpManager.DeleteTenant(ctx, tenantName)
-	if err != nil {
-		return fmt.Errorf("failed to delete IDP tenant: %w", err)
+	// Always attempt IdP cleanup. CreateTenant may have succeeded even when
+	// status never reached SYNCED (for example persist failed, or the tenant
+	// was deleted mid-sync before idp_tenant_name was saved).
+	tenantName := t.tenant.GetStatus().GetIdpTenantName()
+	if tenantName == "" {
+		tenantName = t.tenant.GetMetadata().GetName()
 	}
-
-	t.r.logger.DebugContext(ctx, "Deleted tenant from IDP",
-		slog.String("tenant_id", t.tenant.GetId()),
-		slog.String("idp_name", tenantName),
-	)
+	if tenantName != "" {
+		if err := t.r.idpManager.DeleteTenant(ctx, tenantName); err != nil {
+			return fmt.Errorf("failed to delete IDP tenant: %w", err)
+		}
+		t.r.logger.DebugContext(ctx, "Deleted tenant from IDP",
+			slog.String("tenant_id", t.tenant.GetId()),
+			slog.String("idp_name", tenantName),
+		)
+	}
 
 	t.removeFinalizer()
 	return nil
+}
+
+// deleteBreakGlassSecret removes the persisted break-glass credentials secret so
+// it cannot block project or tenant deletion via foreign keys.
+func (t *task) deleteBreakGlassSecret(ctx context.Context) error {
+	if t.r.secretsClient == nil {
+		return nil
+	}
+	ids, err := t.breakGlassSecretIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := t.r.secretsClient.Delete(ctx, privatev1.SecretsDeleteRequest_builder{
+			Id: id,
+		}.Build()); err != nil {
+			if grpcstatus.Code(err) == grpccodes.NotFound {
+				continue
+			}
+			return fmt.Errorf("failed to delete break-glass credentials secret: %w", err)
+		}
+	}
+	return nil
+}
+
+func (t *task) clearBreakGlassSecretRef() {
+	if t.tenant.HasSpec() {
+		t.tenant.GetSpec().ClearBreakGlassCredentialsSecret()
+	}
+}
+
+func (t *task) breakGlassSecretIDs(ctx context.Context) ([]string, error) {
+	if id := t.tenant.GetSpec().GetBreakGlassCredentialsSecret().GetId(); id != "" {
+		return []string{id}, nil
+	}
+	tenantName := t.tenant.GetMetadata().GetName()
+	if tenantName == "" {
+		return nil, nil
+	}
+	filter := fmt.Sprintf(
+		"this.metadata.name == %s && this.metadata.tenant == %s",
+		strconv.Quote(breakGlassSecretName), strconv.Quote(tenantName),
+	)
+	listResp, err := t.r.secretsClient.List(ctx, privatev1.SecretsListRequest_builder{
+		Filter: new(filter),
+	}.Build())
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up break-glass credentials secret: %w", err)
+	}
+	items := listResp.GetItems()
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.GetId())
+	}
+	return ids, nil
 }
 
 // countRemainingProjects returns the number of projects that still belong to
 // this tenant. The tenant reconciler blocks deletion until this returns 0 —
 // it is the administrator's responsibility to delete all projects first.
 func (t *task) countRemainingProjects(ctx context.Context) (int32, error) {
-	listFilter := fmt.Sprintf("this.metadata.tenant == %q", t.tenant.GetMetadata().GetName())
+	listFilter := fmt.Sprintf(
+		"this.metadata.tenant == %q && !has(this.metadata.deletion_timestamp)",
+		t.tenant.GetMetadata().GetName(),
+	)
 	listResp, err := t.r.projectsClient.List(ctx, privatev1.ProjectsListRequest_builder{
 		Filter: new(listFilter),
 		Limit:  new(int32(0)),

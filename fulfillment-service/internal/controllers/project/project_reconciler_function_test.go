@@ -1157,7 +1157,7 @@ var _ = Describe("Deletion Cleanup", func() {
 		Expect(project.GetMetadata().GetFinalizers()).To(ContainElement(finalizers.Controller))
 	})
 
-	It("should skip Keycloak cleanup and signal tenant for root project deletion", func() {
+	It("should delete default project Keycloak groups and signal tenant for root project deletion", func() {
 		project := privatev1.Project_builder{
 			Id: "project-1",
 			Metadata: privatev1.Metadata_builder{
@@ -1179,10 +1179,13 @@ var _ = Describe("Deletion Cleanup", func() {
 			List(gomock.Any(), gomock.Any()).
 			Return(&privatev1.ProjectMembershipsListResponse{}, nil)
 
-		// Root project goes through Keycloak cleanup — group at "/" not found, swallowed
+		// Default project groups live at /system:viewers and /system:managers
 		mockIdpClient.EXPECT().
-			GetGroupIDByPath(gomock.Any(), "acme", "/").
-			Return("", fmt.Errorf("organization group not found: /"))
+			GetGroupIDByPath(gomock.Any(), "acme", "/system:viewers").
+			Return("", fmt.Errorf("organization group not found: /system:viewers"))
+		mockIdpClient.EXPECT().
+			GetGroupIDByPath(gomock.Any(), "acme", "/system:managers").
+			Return("", fmt.Errorf("organization group not found: /system:managers"))
 
 		// Root project triggers tenant signal after finalizer removal
 		mockTenantsClient.EXPECT().

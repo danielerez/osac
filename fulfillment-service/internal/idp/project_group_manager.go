@@ -82,21 +82,37 @@ func (m *ProjectGroupManager) DeleteProjectGroups(ctx context.Context, tenant, p
 		return fmt.Errorf("project name cannot contain '/' character")
 	}
 
+	// The default project (empty name) maps to tenant-root authorization groups, not a
+	// named parent group. Match CreateProjectGroups, which stores them at
+	// /system:viewers and /system:managers.
+	if projectName == "" {
+		for _, groupType := range []string{GroupNameViewers, GroupNameManagers} {
+			groupPath := path.Join("/", groupType)
+			if err := m.deleteGroupByPath(ctx, tenant, groupPath); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	// Delete the parent project group, which will cascade delete the system:viewers and system:managers subgroups
 	projectGroupPath := fmt.Sprintf("/%s", projectName)
 
-	projectGroupID, err := m.getGroupIDByPath(ctx, tenant, projectGroupPath)
+	return m.deleteGroupByPath(ctx, tenant, projectGroupPath)
+}
+
+func (m *ProjectGroupManager) deleteGroupByPath(ctx context.Context, tenant, groupPath string) error {
+	projectGroupID, err := m.getGroupIDByPath(ctx, tenant, groupPath)
 	if err != nil {
-		// Only swallow "not found" errors - propagate other errors (network, auth, etc.) for retry
-		if strings.Contains(err.Error(), "organization group not found") {
+		if isGroupNotFoundError(err) {
 			m.logger.WarnContext(ctx, "Project group not found, skipping deletion",
-				slog.String("group_path", projectGroupPath),
+				slog.String("group_path", groupPath),
 				slog.String("tenant", tenant),
 			)
 			return nil
 		}
 		m.logger.ErrorContext(ctx, "Failed to get project group ID",
-			slog.String("group_path", projectGroupPath),
+			slog.String("group_path", groupPath),
 			slog.String("tenant", tenant),
 			slog.Any("error", err),
 		)
@@ -106,19 +122,28 @@ func (m *ProjectGroupManager) DeleteProjectGroups(ctx context.Context, tenant, p
 	if err = m.client.DeleteGroup(ctx, tenant, projectGroupID); err != nil {
 		m.logger.ErrorContext(ctx, "Failed to delete project group",
 			slog.String("group_id", projectGroupID),
-			slog.String("group_path", projectGroupPath),
+			slog.String("group_path", groupPath),
 			slog.Any("error", err),
 		)
-		return fmt.Errorf("failed to delete project group %s: %w", projectGroupPath, err)
+		return fmt.Errorf("failed to delete project group %s: %w", groupPath, err)
 	}
 
 	m.logger.InfoContext(ctx, "Deleted project group and subgroups",
-		slog.String("group_path", projectGroupPath),
-		slog.String("project_name", projectName),
+		slog.String("group_path", groupPath),
 		slog.String("tenant", tenant),
 	)
 
 	return nil
+}
+
+func isGroupNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "organization group not found") ||
+		strings.Contains(msg, "not found among children") ||
+		strings.Contains(msg, "failed to find group segment")
 }
 
 // getGroupIDByPath is a helper to get the group ID from a group path.

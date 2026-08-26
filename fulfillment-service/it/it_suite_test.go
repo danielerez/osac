@@ -22,6 +22,8 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	. "github.com/onsi/ginkgo/v2/dsl/core"
 	. "github.com/onsi/gomega"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -102,5 +104,9 @@ var _ = BeforeSuite(func() {
 			}.Build(),
 		}.Build(),
 	}.Build())
-	Expect(err).ToNot(HaveOccurred())
+	if err != nil {
+		if st, ok := status.FromError(err); !ok || st.Code() != codes.AlreadyExists {
+			Expect(err).ToNot(HaveOccurred())
+		}
+	}
 })

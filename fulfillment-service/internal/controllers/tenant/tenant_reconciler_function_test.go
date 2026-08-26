@@ -37,6 +37,7 @@ type mockSecretsClient struct {
 	getFunc    func(ctx context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error)
 	createFunc func(ctx context.Context, req *privatev1.SecretsCreateRequest) (*privatev1.SecretsCreateResponse, error)
 	listFunc   func(ctx context.Context, req *privatev1.SecretsListRequest) (*privatev1.SecretsListResponse, error)
+	deleteFunc func(ctx context.Context, req *privatev1.SecretsDeleteRequest) (*privatev1.SecretsDeleteResponse, error)
 }
 
 func (m *mockSecretsClient) Get(ctx context.Context, req *privatev1.SecretsGetRequest, _ ...grpc.CallOption) (*privatev1.SecretsGetResponse, error) {
@@ -64,7 +65,10 @@ func (m *mockSecretsClient) Update(context.Context, *privatev1.SecretsUpdateRequ
 	return nil, fmt.Errorf("unexpected Update")
 }
 
-func (m *mockSecretsClient) Delete(context.Context, *privatev1.SecretsDeleteRequest, ...grpc.CallOption) (*privatev1.SecretsDeleteResponse, error) {
+func (m *mockSecretsClient) Delete(ctx context.Context, req *privatev1.SecretsDeleteRequest, _ ...grpc.CallOption) (*privatev1.SecretsDeleteResponse, error) {
+	if m.deleteFunc != nil {
+		return m.deleteFunc(ctx, req)
+	}
 	return nil, fmt.Errorf("unexpected Delete")
 }
 
@@ -1069,7 +1073,7 @@ var _ = Describe("Deletion", func() {
 		Expect(tenant.GetMetadata().GetFinalizers()).ToNot(ContainElement(finalizers.Controller))
 	})
 
-	It("should skip IDP deletion and remove finalizer when tenant not synced", func() {
+	It("should delete IDP tenant by metadata name when not synced", func() {
 		deletionTimestamp := timestamppb.New(time.Now())
 		tenant := privatev1.Tenant_builder{
 			Id: "org-123",
@@ -1088,6 +1092,11 @@ var _ = Describe("Deletion", func() {
 			Return(privatev1.ProjectsListResponse_builder{Total: 0}.Build(), nil).
 			Times(1)
 
+		mockClient.EXPECT().
+			DeleteTenant(gomock.Any(), "test-org").
+			Return(nil).
+			Times(1)
+
 		task := &task{
 			r:      reconciler,
 			tenant: tenant,
@@ -1098,7 +1107,7 @@ var _ = Describe("Deletion", func() {
 		Expect(tenant.GetMetadata().GetFinalizers()).ToNot(ContainElement(finalizers.Controller))
 	})
 
-	It("should skip IDP deletion and remove finalizer when idp_tenant_name is empty", func() {
+	It("should delete IDP tenant by metadata name when idp_tenant_name is empty", func() {
 		deletionTimestamp := timestamppb.New(time.Now())
 		tenant := privatev1.Tenant_builder{
 			Id: "org-123",
@@ -1118,6 +1127,11 @@ var _ = Describe("Deletion", func() {
 			Return(privatev1.ProjectsListResponse_builder{Total: 0}.Build(), nil).
 			Times(1)
 
+		mockClient.EXPECT().
+			DeleteTenant(gomock.Any(), "test-org").
+			Return(nil).
+			Times(1)
+
 		task := &task{
 			r:      reconciler,
 			tenant: tenant,
@@ -1125,6 +1139,109 @@ var _ = Describe("Deletion", func() {
 
 		err := task.delete(ctx)
 		Expect(err).ToNot(HaveOccurred())
+		Expect(tenant.GetMetadata().GetFinalizers()).ToNot(ContainElement(finalizers.Controller))
+	})
+
+	It("should delete the break-glass secret before waiting for remaining projects", func() {
+		deletionTimestamp := timestamppb.New(time.Now())
+		tenant := privatev1.Tenant_builder{
+			Id: "org-123",
+			Metadata: privatev1.Metadata_builder{
+				Name:              "test-org",
+				Finalizers:        []string{finalizers.Controller},
+				DeletionTimestamp: deletionTimestamp,
+			}.Build(),
+			Spec: privatev1.TenantSpec_builder{
+				BreakGlassCredentialsSecret: privatev1.SecretLocalReference_builder{
+					Id:   "bg-secret-id",
+					Name: breakGlassSecretName,
+				}.Build(),
+			}.Build(),
+			Status: privatev1.TenantStatus_builder{
+				State:            privatev1.TenantState_TENANT_STATE_SYNCED,
+				IdpTenantName:    "test-org",
+				BreakGlassUserId: "user-123",
+			}.Build(),
+		}.Build()
+
+		deleted := false
+		secrets := &mockSecretsClient{
+			deleteFunc: func(_ context.Context, req *privatev1.SecretsDeleteRequest) (*privatev1.SecretsDeleteResponse, error) {
+				Expect(req.GetId()).To(Equal("bg-secret-id"))
+				deleted = true
+				return &privatev1.SecretsDeleteResponse{}, nil
+			},
+		}
+		reconciler.secretsClient = secrets
+
+		mockProjectsClient.EXPECT().
+			List(gomock.Any(), gomock.Any()).
+			Return(privatev1.ProjectsListResponse_builder{
+				Total: 1,
+			}.Build(), nil).
+			Times(1)
+
+		task := &task{
+			r:      reconciler,
+			tenant: tenant,
+		}
+
+		err := task.delete(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("project(s) pending deletion"))
+		Expect(deleted).To(BeTrue())
+		Expect(tenant.GetSpec().GetBreakGlassCredentialsSecret()).To(BeNil())
+		Expect(tenant.GetMetadata().GetFinalizers()).To(ContainElement(finalizers.Controller))
+	})
+
+	It("should clear the break-glass secret ref so finalizer removal can persist", func() {
+		deletionTimestamp := timestamppb.New(time.Now())
+		tenant := privatev1.Tenant_builder{
+			Id: "org-123",
+			Metadata: privatev1.Metadata_builder{
+				Name:              "test-org",
+				Finalizers:        []string{finalizers.Controller},
+				DeletionTimestamp: deletionTimestamp,
+			}.Build(),
+			Spec: privatev1.TenantSpec_builder{
+				BreakGlassCredentialsSecret: privatev1.SecretLocalReference_builder{
+					Id:   "bg-secret-id",
+					Name: breakGlassSecretName,
+				}.Build(),
+			}.Build(),
+			Status: privatev1.TenantStatus_builder{
+				State:            privatev1.TenantState_TENANT_STATE_SYNCED,
+				IdpTenantName:    "test-org",
+				BreakGlassUserId: "user-123",
+			}.Build(),
+		}.Build()
+
+		secrets := &mockSecretsClient{
+			deleteFunc: func(_ context.Context, req *privatev1.SecretsDeleteRequest) (*privatev1.SecretsDeleteResponse, error) {
+				Expect(req.GetId()).To(Equal("bg-secret-id"))
+				return &privatev1.SecretsDeleteResponse{}, nil
+			},
+		}
+		reconciler.secretsClient = secrets
+
+		mockProjectsClient.EXPECT().
+			List(gomock.Any(), gomock.Any()).
+			Return(privatev1.ProjectsListResponse_builder{Total: 0}.Build(), nil).
+			Times(1)
+
+		mockClient.EXPECT().
+			DeleteTenant(gomock.Any(), "test-org").
+			Return(nil).
+			Times(1)
+
+		task := &task{
+			r:      reconciler,
+			tenant: tenant,
+		}
+
+		err := task.delete(ctx)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(tenant.GetSpec().GetBreakGlassCredentialsSecret()).To(BeNil())
 		Expect(tenant.GetMetadata().GetFinalizers()).ToNot(ContainElement(finalizers.Controller))
 	})
 
@@ -2252,6 +2369,10 @@ var _ = Describe("Vault namespace cleanup during deletion", func() {
 			List(gomock.Any(), gomock.Any()).
 			Return(privatev1.ProjectsListResponse_builder{Total: 0}.Build(), nil)
 
+		mockIDPClient.EXPECT().
+			DeleteTenant(gomock.Any(), "vault-only-org").
+			Return(nil)
+
 		mockVaultClient.EXPECT().
 			DeleteTenantNamespace(gomock.Any(), "vault-only-org").
 			Return(nil)
@@ -2285,6 +2406,10 @@ var _ = Describe("Vault namespace cleanup during deletion", func() {
 		mockProjectsClient.EXPECT().
 			List(gomock.Any(), gomock.Any()).
 			Return(privatev1.ProjectsListResponse_builder{Total: 0}.Build(), nil)
+
+		mockIDPClient.EXPECT().
+			DeleteTenant(gomock.Any(), "failed-org").
+			Return(nil)
 
 		mockVaultClient.EXPECT().
 			DeleteTenantNamespace(gomock.Any(), "failed-org").

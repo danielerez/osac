@@ -112,7 +112,7 @@ var _ = Describe("Tenant onboarding to hub", func() {
 		).Should(Succeed())
 
 		By("Deleting the tenant")
-		deleteTenant(ctx, tenantsClient, projectsClient, id)
+		deleteTenant(ctx, tenantsClient, projectsClient, id, name)
 
 		By("Verifying Tenant CR is removed from the hub cluster")
 		Eventually(

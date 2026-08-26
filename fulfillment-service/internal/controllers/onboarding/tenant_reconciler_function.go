@@ -246,6 +246,7 @@ func (t *task) delete(ctx context.Context) error {
 		return err
 	}
 
+	crStillPresent := false
 	for _, hub := range hubs {
 		hubEntry, err := t.r.hubCache.Get(ctx, hub.GetId())
 		if err != nil {
@@ -288,13 +289,18 @@ func (t *task) delete(ctx context.Context) error {
 		if err := t.deleteNamespaceOnHub(ctx, hub.GetId(), hubEntry); err != nil {
 			return err
 		}
-
-		return nil
+		crStillPresent = true
+	}
+	if crStillPresent {
+		return fmt.Errorf("tenant CR still present on one or more hubs")
 	}
 
 	// Wait for all projects to be archived before removing the finalizer —
 	// otherwise the DAO archive hits FK violations from the projects table.
-	listFilter := fmt.Sprintf("this.metadata.tenant == %q", t.tenant.GetMetadata().GetName())
+	listFilter := fmt.Sprintf(
+		"this.metadata.tenant == %q && !has(this.metadata.deletion_timestamp)",
+		t.tenant.GetMetadata().GetName(),
+	)
 	listResp, err := t.r.projectsClient.List(ctx, privatev1.ProjectsListRequest_builder{
 		Filter: new(listFilter),
 		Limit:  new(int32(0)),

@@ -126,6 +126,37 @@ var _ = Describe("ProjectGroupManager", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("project name cannot contain '..' sequence"))
 		})
+
+		It("should delete tenant-root groups for the default project", func() {
+			mockClient.EXPECT().
+				GetGroupIDByPath(gomock.Any(), "test-org", "/system:viewers").
+				Return("viewers-group-id", nil)
+			mockClient.EXPECT().
+				DeleteGroup(gomock.Any(), "test-org", "viewers-group-id").
+				Return(nil)
+
+			mockClient.EXPECT().
+				GetGroupIDByPath(gomock.Any(), "test-org", "/system:managers").
+				Return("managers-group-id", nil)
+			mockClient.EXPECT().
+				DeleteGroup(gomock.Any(), "test-org", "managers-group-id").
+				Return(nil)
+
+			err := manager.DeleteProjectGroups(ctx, "test-org", "")
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		It("should return nil when default project groups are not found", func() {
+			mockClient.EXPECT().
+				GetGroupIDByPath(gomock.Any(), "test-org", "/system:viewers").
+				Return("", errors.New(`failed to find group segment 0 'system:viewers' (parent: ): group "system:viewers" not found among children of parent ""`))
+			mockClient.EXPECT().
+				GetGroupIDByPath(gomock.Any(), "test-org", "/system:managers").
+				Return("", errors.New(`failed to find group segment 0 'system:managers' (parent: ): group "system:managers" not found among children of parent ""`))
+
+			err := manager.DeleteProjectGroups(ctx, "test-org", "")
+			Expect(err).ToNot(HaveOccurred())
+		})
 	})
 
 	Describe("CreateProjectGroups", func() {

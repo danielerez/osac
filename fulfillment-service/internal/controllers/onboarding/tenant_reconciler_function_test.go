@@ -894,7 +894,7 @@ var _ = Describe("run", func() {
 				f := newFunction(mockHubCache, mockHubs, mockTenants, mockProjects)
 				err := f.run(ctx, tenant)
 
-				Expect(err).ToNot(HaveOccurred())
+				Expect(err).To(MatchError(ContainSubstring("tenant CR still present")))
 				Expect(hasFinalizer(tenant)).To(BeTrue())
 			})
 		})
@@ -979,7 +979,7 @@ var _ = Describe("run", func() {
 				f := newFunction(mockHubCache, mockHubs, mockTenants, mockProjects)
 				err := f.run(ctx, tenant)
 
-				Expect(err).ToNot(HaveOccurred())
+				Expect(err).To(MatchError(ContainSubstring("tenant CR still present")))
 				Expect(hasFinalizer(tenant)).To(BeTrue())
 			})
 		})

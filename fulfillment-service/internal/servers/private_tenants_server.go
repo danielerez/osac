@@ -20,14 +20,17 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	"github.com/osac-project/osac/fulfillment-service/internal/references"
@@ -207,7 +210,7 @@ func (s *PrivateTenantsServer) Create(ctx context.Context,
 		metadata.SetTenant(name)
 	}
 
-	if err = s.validateBreakGlassCredentialsSecret(ctx, object); err != nil {
+	if err = s.validateBreakGlassCredentialsSecret(ctx, object, false); err != nil {
 		return
 	}
 
@@ -252,14 +255,18 @@ func (s *PrivateTenantsServer) Create(ctx context.Context,
 
 func (s *PrivateTenantsServer) Update(ctx context.Context,
 	request *privatev1.TenantsUpdateRequest) (response *privatev1.TenantsUpdateResponse, err error) {
-	if err = s.validateBreakGlassCredentialsSecret(ctx, request.GetObject()); err != nil {
+	if err = s.validateBreakGlassCredentialsSecret(ctx, request.GetObject(), true); err != nil {
 		return
 	}
 	// Domain validation is now handled by protovalidate after update_mask merge in generic server
 	// Delegate to the generic server:
 	err = s.generic.Update(ctx, request, &response)
-	if err == nil {
-		stripBreakGlassCredentials(response.GetObject())
+	if err != nil {
+		return
+	}
+	stripBreakGlassCredentials(response.GetObject())
+	if err = s.clearStaleBreakGlassCredentialsSecretRef(ctx, response.GetObject()); err != nil {
+		return
 	}
 	return
 }
@@ -267,13 +274,17 @@ func (s *PrivateTenantsServer) Update(ctx context.Context,
 func (s *PrivateTenantsServer) Delete(ctx context.Context,
 	request *privatev1.TenantsDeleteRequest) (response *privatev1.TenantsDeleteResponse, err error) {
 	getResponse, getErr := s.dao.Get().SetId(request.GetId()).Do(ctx)
-	err = s.generic.Delete(ctx, request, &response)
-	if err != nil {
-		return
-	}
+	// Delete the break-glass secret before generic.Delete so its project and
+	// tenant FKs cannot deadlock teardown (projects cannot be removed while
+	// the secret exists, and the tenant cannot be removed while projects exist).
 	if getErr == nil {
-		s.deleteBreakGlassSecret(ctx, getResponse.GetObject())
+		tenant := getResponse.GetObject()
+		s.deleteBreakGlassSecret(ctx, tenant)
+		if err = s.persistBreakGlassCredentialsSecretRefClear(ctx, tenant); err != nil {
+			return
+		}
 	}
+	err = s.generic.Delete(ctx, request, &response)
 	return
 }
 
@@ -303,21 +314,106 @@ func stripBreakGlassCredentials(tenant *privatev1.Tenant) {
 	}
 }
 
+const breakGlassCredentialsSecretName = "break-glass-credentials"
+
 func (s *PrivateTenantsServer) deleteBreakGlassSecret(ctx context.Context, tenant *privatev1.Tenant) {
-	ref := tenant.GetSpec().GetBreakGlassCredentialsSecret()
-	if ref == nil || ref.GetId() == "" {
+	if tenant == nil {
 		return
 	}
-	if _, err := s.secretsDao.Delete().SetId(ref.GetId()).Do(ctx); err != nil {
+	deleted := map[string]struct{}{}
+	if id := tenant.GetSpec().GetBreakGlassCredentialsSecret().GetId(); id != "" {
+		s.deleteSecretByID(ctx, tenant, id)
+		deleted[id] = struct{}{}
+	}
+	tenantName := tenant.GetMetadata().GetName()
+	if tenantName == "" {
+		return
+	}
+	filter := fmt.Sprintf("this.metadata.tenant == %s && this.metadata.name == %s",
+		strconv.Quote(tenantName), strconv.Quote(breakGlassCredentialsSecretName))
+	listResp, err := s.secretsDao.List().SetFilter(filter).Do(ctx)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "Failed to list break-glass credentials secrets",
+			slog.String("tenant", tenantName),
+			slog.Any("error", err))
+		return
+	}
+	for _, secret := range listResp.GetItems() {
+		id := secret.GetId()
+		if _, ok := deleted[id]; ok {
+			continue
+		}
+		s.deleteSecretByID(ctx, tenant, id)
+	}
+}
+
+func (s *PrivateTenantsServer) deleteSecretByID(ctx context.Context, tenant *privatev1.Tenant, id string) {
+	tx, err := database.TxFromContext(ctx)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "Failed to get transaction for break-glass secret deletion",
+			slog.String("tenant", tenant.GetMetadata().GetName()),
+			slog.String("secret_id", id),
+			slog.Any("error", err))
+		return
+	}
+	// Use a savepoint so a missing/already-deleted secret does not mark the
+	// outer Tenants/Delete transaction for rollback via DAO ReportError.
+	err = tx.Savepoint(ctx, func(spCtx context.Context) error {
+		_, err := s.secretsDao.Delete().SetId(id).Do(spCtx)
+		if err != nil {
+			var nf *dao.ErrNotFound
+			if errors.As(err, &nf) {
+				return nil
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		s.logger.ErrorContext(ctx, "Failed to delete break-glass credentials secret",
 			slog.String("tenant", tenant.GetMetadata().GetName()),
-			slog.String("secret_id", ref.GetId()),
+			slog.String("secret_id", id),
 			slog.Any("error", err))
 	}
 }
 
-func (s *PrivateTenantsServer) validateBreakGlassCredentialsSecret(ctx context.Context,
+func (s *PrivateTenantsServer) clearStaleBreakGlassCredentialsSecretRef(ctx context.Context,
 	tenant *privatev1.Tenant) error {
+	ref := tenant.GetSpec().GetBreakGlassCredentialsSecret()
+	if ref == nil {
+		return nil
+	}
+	_, err := references.NewDAOLookupFunc(s.secretsDao)(ctx, "", "", ref.GetId(), ref.GetName())
+	if err == nil {
+		return nil
+	}
+	var nf interface{ IsNotFound() bool }
+	if !errors.As(err, &nf) || !nf.IsNotFound() {
+		return nil
+	}
+	if err = s.persistBreakGlassCredentialsSecretRefClear(ctx, tenant); err != nil {
+		return err
+	}
+	tenant.GetSpec().ClearBreakGlassCredentialsSecret()
+	return nil
+}
+
+func (s *PrivateTenantsServer) persistBreakGlassCredentialsSecretRefClear(ctx context.Context,
+	tenant *privatev1.Tenant) error {
+	if tenant.GetSpec().GetBreakGlassCredentialsSecret() == nil {
+		return nil
+	}
+	updated := proto.Clone(tenant).(*privatev1.Tenant)
+	updated.GetSpec().ClearBreakGlassCredentialsSecret()
+	_, err := s.dao.Update().SetObject(updated).Do(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to clear break-glass credentials secret reference: %w", err)
+	}
+	return nil
+}
+
+func (s *PrivateTenantsServer) validateBreakGlassCredentialsSecret(ctx context.Context,
+	tenant *privatev1.Tenant, allowStaleRef bool) error {
 	ref := tenant.GetSpec().GetBreakGlassCredentialsSecret()
 	if ref == nil {
 		return nil
@@ -334,6 +430,12 @@ func (s *PrivateTenantsServer) validateBreakGlassCredentialsSecret(ctx context.C
 		}
 		var nf interface{ IsNotFound() bool }
 		if errors.As(err, &nf) && nf.IsNotFound() {
+			if allowStaleRef {
+				if tenant.HasSpec() {
+					tenant.GetSpec().ClearBreakGlassCredentialsSecret()
+				}
+				return nil
+			}
 			return grpcstatus.Errorf(grpccodes.InvalidArgument,
 				"there is no secret with identifier or name '%s'", refKey(ref))
 		}

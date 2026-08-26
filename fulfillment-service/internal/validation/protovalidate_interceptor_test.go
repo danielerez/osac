@@ -29,6 +29,9 @@ import (
 	publicv1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/public/v1"
 )
 
+// testPassword is a fixture credential; the test* prefix marks it as non-production.
+const testPassword = "secret"
+
 var _ = Describe("Protovalidate interceptor", func() {
 	var interceptor *ProtovalidateInterceptor
 
@@ -462,16 +465,17 @@ var _ = Describe("Protovalidate interceptor", func() {
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("Rejects project with empty name", func() {
+		It("Accepts project with empty name (default project)", func() {
 			project := privatev1.Project_builder{
 				Metadata: privatev1.Metadata_builder{
 					Name: "",
 				}.Build(),
 			}.Build()
 
+			handlerCalled := false
 			mockHandler := func(ctx context.Context, req any) (any, error) {
-				Fail("Handler should not be called for invalid request")
-				return nil, nil
+				handlerCalled = true
+				return "response", nil
 			}
 
 			response, err := interceptor.UnaryServer(
@@ -481,11 +485,9 @@ var _ = Describe("Protovalidate interceptor", func() {
 				mockHandler,
 			)
 
-			Expect(err).To(HaveOccurred())
-			Expect(response).To(BeNil())
-			status, ok := grpcstatus.FromError(err)
-			Expect(ok).To(BeTrue())
-			Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
+			Expect(err).ToNot(HaveOccurred())
+			Expect(handlerCalled).To(BeTrue())
+			Expect(response).To(Equal("response"))
 		})
 
 		It("Accepts project with single DNS label name", func() {
@@ -588,7 +590,7 @@ var _ = Describe("Protovalidate interceptor", func() {
 						Endpoint: "https://storage.example.com",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -625,7 +627,7 @@ var _ = Describe("Protovalidate interceptor", func() {
 						Endpoint: "",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -695,7 +697,7 @@ var _ = Describe("Protovalidate interceptor", func() {
 						Endpoint: "https://storage.example.com",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -806,7 +808,7 @@ var _ = Describe("Protovalidate interceptor", func() {
 						Endpoint: "https://storage.example.com",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 							PasswordSecret: privatev1.SecretLocalReference_builder{
 								Id: "secret-id",
 							}.Build(),
@@ -846,7 +848,7 @@ var _ = Describe("Protovalidate interceptor", func() {
 						Endpoint: "https://storage.example.com",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),

@@ -101,19 +101,21 @@ func deleteSecrets(ctx context.Context, client privatev1.SecretsClient, tenant s
 	listRequest := privatev1.SecretsListRequest_builder{
 		Filter: &listFilter,
 	}.Build()
-	for {
-		listResponse, err := client.List(ctx, listRequest)
-		Expect(err).ToNot(HaveOccurred())
-		if listResponse.GetTotal() == 0 {
-			break
-		}
-		for _, item := range listResponse.GetItems() {
-			_, err := client.Delete(ctx, privatev1.SecretsDeleteRequest_builder{
-				Id: item.GetId(),
-			}.Build())
-			Expect(err).ToNot(HaveOccurred())
-		}
-	}
+	Eventually(
+		func(g Gomega) {
+			listResponse, err := client.List(ctx, listRequest)
+			g.Expect(err).ToNot(HaveOccurred())
+			for _, item := range listResponse.GetItems() {
+				_, err := client.Delete(ctx, privatev1.SecretsDeleteRequest_builder{
+					Id: item.GetId(),
+				}.Build())
+				g.Expect(err).ToNot(HaveOccurred())
+			}
+			g.Expect(listResponse.GetTotal()).To(BeZero())
+		},
+		time.Minute,
+		time.Second,
+	).Should(Succeed())
 }
 
 func deleteTenant(ctx context.Context, tenantsClient privatev1.TenantsClient, projectsClient privatev1.ProjectsClient,
@@ -151,11 +153,17 @@ func deleteTenant(ctx context.Context, tenantsClient privatev1.TenantsClient, pr
 	Expect(err).ToNot(HaveOccurred())
 
 	// Wake tenant and onboarding reconcilers so finalizer removal is not delayed
-	// waiting for the next watch/sync cycle.
+	// waiting for the next watch/sync cycle. Tolerate NotFound: Delete above starts
+	// asynchronous finalizer processing, so the tenant may already be archived by the
+	// time this best-effort nudge runs, which means the goal state is already reached.
 	_, err = tenantsClient.Signal(ctx, privatev1.TenantsSignalRequest_builder{
 		Id: id,
 	}.Build())
-	Expect(err).ToNot(HaveOccurred())
+	if err != nil {
+		signalStatus, ok := grpcstatus.FromError(err)
+		Expect(ok).To(BeTrue())
+		Expect(signalStatus.Code()).To(Equal(grpccodes.NotFound))
+	}
 
 	Eventually(
 		func(g Gomega) {

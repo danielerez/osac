@@ -255,8 +255,14 @@ func (s *PrivateTenantsServer) Create(ctx context.Context,
 
 func (s *PrivateTenantsServer) Update(ctx context.Context,
 	request *privatev1.TenantsUpdateRequest) (response *privatev1.TenantsUpdateResponse, err error) {
-	if err = s.validateBreakGlassCredentialsSecret(ctx, request.GetObject(), true); err != nil {
-		return
+	// Only validate the break-glass Secret reference when the update actually
+	// touches it. Running the lookup for partial updates that omit the field
+	// would perform a needless Secret resolution and mutate the request object,
+	// diverging from the mask-aware behavior of the storage backends server.
+	if updateIncludesField(request.GetUpdateMask(), breakGlassCredentialsSecretField) {
+		if err = s.validateBreakGlassCredentialsSecret(ctx, request.GetObject(), true); err != nil {
+			return
+		}
 	}
 	// Domain validation is now handled by protovalidate after update_mask merge in generic server
 	// Delegate to the generic server:
@@ -315,6 +321,10 @@ func stripBreakGlassCredentials(tenant *privatev1.Tenant) {
 }
 
 const breakGlassCredentialsSecretName = "break-glass-credentials"
+
+// breakGlassCredentialsSecretField is the update-mask path guarding break-glass
+// Secret reference validation on partial updates.
+const breakGlassCredentialsSecretField = "spec.break_glass_credentials_secret"
 
 func (s *PrivateTenantsServer) deleteBreakGlassSecret(ctx context.Context, tenant *privatev1.Tenant) {
 	if tenant == nil {

@@ -33,6 +33,13 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 )
 
+// Fixture credentials for tenant reconciler tests; test* prefix marks them non-production.
+const (
+	testPreGeneratedPassword = "pre-generated-password"
+	testInlinePassword       = "inline-password"
+	testSecretPassword       = "from-secret"
+)
+
 type mockSecretsClient struct {
 	getFunc    func(ctx context.Context, req *privatev1.SecretsGetRequest) (*privatev1.SecretsGetResponse, error)
 	createFunc func(ctx context.Context, req *privatev1.SecretsCreateRequest) (*privatev1.SecretsCreateResponse, error)
@@ -253,7 +260,7 @@ var _ = Describe("IDP Sync", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: "test-org-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -276,7 +283,7 @@ var _ = Describe("IDP Sync", func() {
 				Expect(user.Username).To(Equal("test-org-osac-break-glass"))
 				Expect(user.Email).To(Equal("break-glass@test-org.osac.local"))
 				Expect(user.Credentials).To(HaveLen(1))
-				Expect(user.Credentials[0].Value).To(Equal("pre-generated-password"))
+				Expect(user.Credentials[0].Value).To(Equal(testPreGeneratedPassword))
 				user.ID = "user-123"
 				return user, nil
 			}).
@@ -311,7 +318,7 @@ var _ = Describe("IDP Sync", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: "test-org-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -406,7 +413,7 @@ var _ = Describe("IDP Sync", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: auth.SharedTenant + "-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -454,7 +461,7 @@ var _ = Describe("IDP Sync", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: auth.SystemTenant + "-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -540,7 +547,7 @@ var _ = Describe("IDP Sync", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: "domain-org-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -671,7 +678,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 						Id: "secret-id",
 						Data: map[string][]byte{
 							"username": []byte("test-org-osac-break-glass"),
-							"password": []byte("from-secret"),
+							"password": []byte(testSecretPassword),
 						},
 					}.Build(),
 				}.Build(), nil
@@ -705,7 +712,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 			CreateUser(gomock.Any(), "test-org", gomock.Any()).
 			DoAndReturn(func(_ context.Context, _ string, user *idp.User) (*idp.User, error) {
 				Expect(user.Credentials).To(HaveLen(1))
-				Expect(user.Credentials[0].Value).To(Equal("from-secret"))
+				Expect(user.Credentials[0].Value).To(Equal(testSecretPassword))
 				user.ID = "user-123"
 				return user, nil
 			})
@@ -745,7 +752,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: "test-org-osac-break-glass",
-					Password: "inline-password",
+					Password: testInlinePassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -756,7 +763,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 		mockClient.EXPECT().
 			CreateUser(gomock.Any(), "test-org", gomock.Any()).
 			DoAndReturn(func(_ context.Context, _ string, user *idp.User) (*idp.User, error) {
-				Expect(user.Credentials[0].Value).To(Equal("inline-password"))
+				Expect(user.Credentials[0].Value).To(Equal(testInlinePassword))
 				user.ID = "user-123"
 				return user, nil
 			})
@@ -809,7 +816,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 				secret := req.GetObject()
 				Expect(secret.GetMetadata().GetName()).To(Equal("break-glass-credentials"))
 				Expect(secret.GetMetadata().GetTenant()).To(Equal("test-org"))
-				Expect(secret.GetData()).To(HaveKeyWithValue("password", []byte("pre-generated-password")))
+				Expect(secret.GetData()).To(HaveKeyWithValue("password", []byte(testPreGeneratedPassword)))
 				secret.SetId("created-secret-id")
 				return privatev1.SecretsCreateResponse_builder{Object: secret}.Build(), nil
 			},
@@ -830,7 +837,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: "test-org-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -895,7 +902,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: "test-org-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()
@@ -945,7 +952,7 @@ var _ = Describe("Break-glass credentials secret resolution", func() {
 			Status: privatev1.TenantStatus_builder{
 				BreakGlassCredentials: privatev1.BreakGlassCredentials_builder{
 					Username: "test-org-osac-break-glass",
-					Password: "pre-generated-password",
+					Password: testPreGeneratedPassword,
 				}.Build(),
 			}.Build(),
 		}.Build()

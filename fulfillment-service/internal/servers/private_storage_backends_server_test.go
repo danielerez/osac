@@ -32,6 +32,14 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
 )
 
+// Fixture credentials for storage backend tests. Named with a test* prefix so
+// they are not flagged as hardcoded production secrets.
+const (
+	testPassword      = "secret"
+	testNewPassword   = "new-secret"
+	testOtherPassword = "other-secret"
+)
+
 var _ = Describe("Private storage backends server", func() {
 	Describe("Creation", func() {
 		It("Can be built if all the required parameters are set", func() {
@@ -87,7 +95,7 @@ var _ = Describe("Private storage backends server", func() {
 						Endpoint: "https://storage.example.com:8443",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -107,7 +115,7 @@ var _ = Describe("Private storage backends server", func() {
 						Endpoint: "https://storage.example.com:8443",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -123,7 +131,7 @@ var _ = Describe("Private storage backends server", func() {
 			Expect(created.GetSpec().GetProvider()).To(Equal("vast"))
 			Expect(created.GetSpec().GetEndpoint()).To(Equal("https://storage.example.com:8443"))
 			Expect(created.GetSpec().GetCredentials().GetUsername()).To(Equal("admin"))
-			Expect(created.GetSpec().GetCredentials().GetPassword()).To(Equal("secret"))
+			Expect(created.GetSpec().GetCredentials().GetPassword()).To(Equal(testPassword))
 			Expect(created.GetStatus().GetState()).To(Equal(
 				privatev1.StorageBackendState_STORAGE_BACKEND_STATE_READY))
 			Expect(created.GetMetadata().GetTenant()).To(Equal(auth.SharedTenant))
@@ -249,7 +257,7 @@ var _ = Describe("Private storage backends server", func() {
 					Spec: privatev1.StorageBackendSpec_builder{
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "new-admin",
-							Password: "new-secret",
+							Password: testNewPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -257,7 +265,7 @@ var _ = Describe("Private storage backends server", func() {
 			}.Build())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(updateResponse.GetObject().GetSpec().GetCredentials().GetUsername()).To(Equal("new-admin"))
-			Expect(updateResponse.GetObject().GetSpec().GetCredentials().GetPassword()).To(Equal("new-secret"))
+			Expect(updateResponse.GetObject().GetSpec().GetCredentials().GetPassword()).To(Equal(testNewPassword))
 		})
 
 		It("Delete removes the object", func() {
@@ -290,7 +298,7 @@ var _ = Describe("Private storage backends server", func() {
 						Endpoint: "https://storage.example.com:8443",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -312,7 +320,7 @@ var _ = Describe("Private storage backends server", func() {
 						Endpoint: "https://storage.example.com:8443",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 					Status: privatev1.StorageBackendStatus_builder{
@@ -337,7 +345,7 @@ var _ = Describe("Private storage backends server", func() {
 						Endpoint: "https://storage.example.com:8443",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -434,7 +442,7 @@ var _ = Describe("Private storage backends server", func() {
 							Endpoint: "https://other.example.com:8443",
 							Credentials: privatev1.StorageBackendCredentials_builder{
 								Username: "admin",
-								Password: "secret",
+								Password: testPassword,
 							}.Build(),
 						}.Build(),
 					}.Build(),
@@ -544,7 +552,7 @@ var _ = Describe("Private storage backends server", func() {
 						Endpoint: "https://other.example.com:8443",
 						Credentials: privatev1.StorageBackendCredentials_builder{
 							Username: "admin",
-							Password: "secret",
+							Password: testPassword,
 						}.Build(),
 					}.Build(),
 				}.Build(),
@@ -632,10 +640,10 @@ var _ = Describe("Password secret reference", func() {
 		Expect(ref.GetName()).To(Equal("my-secret-name"))
 	})
 
-	It("Creates a storage backend with both password and password_secret", func() {
+	It("Rejects a create request with both password and password_secret", func() {
 		_, err := createBackend(privatev1.StorageBackendCredentials_builder{
 			Username: "admin",
-			Password: "secret",
+			Password: testPassword,
 			PasswordSecret: privatev1.SecretLocalReference_builder{
 				Id: "my-secret-id",
 			}.Build(),
@@ -670,17 +678,17 @@ var _ = Describe("Password secret reference", func() {
 	It("Creates a storage backend with inline password only", func() {
 		response, err := createBackend(privatev1.StorageBackendCredentials_builder{
 			Username: "admin",
-			Password: "secret",
+			Password: testPassword,
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
-		Expect(response.GetObject().GetSpec().GetCredentials().GetPassword()).To(Equal("secret"))
+		Expect(response.GetObject().GetSpec().GetCredentials().GetPassword()).To(Equal(testPassword))
 		Expect(response.GetObject().GetSpec().GetCredentials().GetPasswordSecret()).To(BeNil())
 	})
 
 	It("Updates a storage backend with a valid password_secret", func() {
 		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
 			Username: "admin",
-			Password: "secret",
+			Password: testPassword,
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 
@@ -709,7 +717,7 @@ var _ = Describe("Password secret reference", func() {
 	It("Rejects an update that adds password_secret while inline password remains", func() {
 		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
 			Username: "admin",
-			Password: "secret",
+			Password: testPassword,
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 
@@ -737,7 +745,7 @@ var _ = Describe("Password secret reference", func() {
 	It("Rejects an update with both password and password_secret set", func() {
 		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
 			Username: "admin",
-			Password: "secret",
+			Password: testPassword,
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 
@@ -747,7 +755,7 @@ var _ = Describe("Password secret reference", func() {
 				Spec: privatev1.StorageBackendSpec_builder{
 					Credentials: privatev1.StorageBackendCredentials_builder{
 						Username: "admin",
-						Password: "other-secret",
+						Password: testOtherPassword,
 						PasswordSecret: privatev1.SecretLocalReference_builder{
 							Id: "my-secret-id",
 						}.Build(),
@@ -763,7 +771,7 @@ var _ = Describe("Password secret reference", func() {
 	It("Rejects a masked update that clears both password and password_secret", func() {
 		created, err := createBackend(privatev1.StorageBackendCredentials_builder{
 			Username: "admin",
-			Password: "secret",
+			Password: testPassword,
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 

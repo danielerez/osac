@@ -148,6 +148,18 @@ func (m *mockStorageTiersLister) List(ctx context.Context, in *privatev1.Storage
 	return m.listFunc(ctx, in, opts...)
 }
 
+// mockSecretsClient is a test double for SecretsClient. Set getFunc to override the
+// response for password_secret resolution scenarios.
+type mockSecretsClient struct {
+	getFunc      func(ctx context.Context, in *privatev1.SecretsGetRequest, opts ...grpc.CallOption) (*privatev1.SecretsGetResponse, error)
+	getCallCount int
+}
+
+func (m *mockSecretsClient) Get(ctx context.Context, in *privatev1.SecretsGetRequest, opts ...grpc.CallOption) (*privatev1.SecretsGetResponse, error) {
+	m.getCallCount++
+	return m.getFunc(ctx, in, opts...)
+}
+
 // newTestStorageTier builds a StorageTier fixture with one BackendAssociation per
 // backendID given. Passing no backendIDs produces a tier with zero associations.
 func newTestStorageTier(name string, backendIDs ...string) *privatev1.StorageTier {
@@ -173,7 +185,28 @@ func newTestStorageTier(name string, backendIDs ...string) *privatev1.StorageTie
 const (
 	testBackendUsername = "test-backend-user"
 	testBackendPassword = "test-backend-password"
+	// testSecretPassword is the fixture password returned from a referenced Secret
+	// when a backend uses password_secret instead of an inline password.
+	testSecretPassword = "test-secret-password"
 )
+
+// newTestStorageBackendGetResponseWithSecret builds a StorageBackendsGetResponse whose
+// credentials carry a password_secret reference (id secretID) and no inline password —
+// the shape a backend created with password_secret has.
+func newTestStorageBackendGetResponseWithSecret(provider, secretID string) *privatev1.StorageBackendsGetResponse {
+	return privatev1.StorageBackendsGetResponse_builder{
+		Object: privatev1.StorageBackend_builder{
+			Spec: privatev1.StorageBackendSpec_builder{
+				Provider: provider,
+				Endpoint: "https://" + provider + ".example.com",
+				Credentials: privatev1.StorageBackendCredentials_builder{
+					Username:       testBackendUsername,
+					PasswordSecret: privatev1.SecretLocalReference_builder{Id: secretID}.Build(),
+				}.Build(),
+			}.Build(),
+		}.Build(),
+	}.Build()
+}
 
 // newTestStorageBackendGetResponse builds a StorageBackendsGetResponse fixture for
 // the given provider, with a fixed endpoint/credentials pair.
@@ -684,7 +717,7 @@ var _ = Describe("Storage Controller", func() {
 				},
 			}
 
-			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient)
+			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(defs).To(HaveLen(1))
 			Expect(defs[0].Name).To(Equal("fast"))
@@ -699,6 +732,88 @@ var _ = Describe("Storage Controller", func() {
 				Username: testBackendUsername,
 				Password: testBackendPassword,
 			}))
+		})
+
+		It("should resolve the backend password from the referenced Secret when the inline password is empty", func() {
+			tiersClient := &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return privatev1.StorageTiersListResponse_builder{
+						Items: []*privatev1.StorageTier{newTestStorageTier("fast", "backend-1")},
+					}.Build(), nil
+				},
+			}
+			backendsClient := &mockStorageBackendsClient{
+				getFunc: func(context.Context, *privatev1.StorageBackendsGetRequest, ...grpc.CallOption) (*privatev1.StorageBackendsGetResponse, error) {
+					return newTestStorageBackendGetResponseWithSecret("vast", "secret-1"), nil
+				},
+			}
+			secretsClient := &mockSecretsClient{
+				getFunc: func(_ context.Context, in *privatev1.SecretsGetRequest, _ ...grpc.CallOption) (*privatev1.SecretsGetResponse, error) {
+					Expect(in.GetId()).To(Equal("secret-1"))
+					return privatev1.SecretsGetResponse_builder{
+						Object: privatev1.Secret_builder{
+							Data: map[string][]byte{"password": []byte(testSecretPassword)},
+						}.Build(),
+					}.Build(), nil
+				},
+			}
+
+			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, secretsClient)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(defs).To(HaveLen(1))
+			Expect(secretsClient.getCallCount).To(Equal(1))
+			Expect(conns).To(HaveKeyWithValue("backend-1", provisioning.BackendConnection{
+				Endpoint: "https://vast.example.com",
+				Username: testBackendUsername,
+				Password: testSecretPassword,
+			}))
+		})
+
+		It("should skip a backend whose password_secret is missing data[\"password\"], not provision an empty password", func() {
+			tiersClient := &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return privatev1.StorageTiersListResponse_builder{
+						Items: []*privatev1.StorageTier{newTestStorageTier("fast", "backend-1")},
+					}.Build(), nil
+				},
+			}
+			backendsClient := &mockStorageBackendsClient{
+				getFunc: func(context.Context, *privatev1.StorageBackendsGetRequest, ...grpc.CallOption) (*privatev1.StorageBackendsGetResponse, error) {
+					return newTestStorageBackendGetResponseWithSecret("vast", "secret-1"), nil
+				},
+			}
+			secretsClient := &mockSecretsClient{
+				getFunc: func(context.Context, *privatev1.SecretsGetRequest, ...grpc.CallOption) (*privatev1.SecretsGetResponse, error) {
+					return privatev1.SecretsGetResponse_builder{
+						Object: privatev1.Secret_builder{Data: map[string][]byte{}}.Build(),
+					}.Build(), nil
+				},
+			}
+
+			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, secretsClient)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(defs).To(BeEmpty())
+			Expect(conns).NotTo(HaveKey("backend-1"))
+		})
+
+		It("should skip a backend using password_secret when no SecretsClient is configured", func() {
+			tiersClient := &mockStorageTiersLister{
+				listFunc: func(context.Context, *privatev1.StorageTiersListRequest, ...grpc.CallOption) (*privatev1.StorageTiersListResponse, error) {
+					return privatev1.StorageTiersListResponse_builder{
+						Items: []*privatev1.StorageTier{newTestStorageTier("fast", "backend-1")},
+					}.Build(), nil
+				},
+			}
+			backendsClient := &mockStorageBackendsClient{
+				getFunc: func(context.Context, *privatev1.StorageBackendsGetRequest, ...grpc.CallOption) (*privatev1.StorageBackendsGetResponse, error) {
+					return newTestStorageBackendGetResponseWithSecret("vast", "secret-1"), nil
+				},
+			}
+
+			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(defs).To(BeEmpty())
+			Expect(conns).NotTo(HaveKey("backend-1"))
 		})
 
 		It("should skip a tier with no backend association without failing", func() {
@@ -718,7 +833,7 @@ var _ = Describe("Storage Controller", func() {
 				},
 			}
 
-			defs, _, err := resolveTierDefinitions(ctx, tiersClient, backendsClient)
+			defs, _, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(defs).To(HaveLen(1))
 			Expect(defs[0].Name).To(Equal("fast"))
@@ -742,7 +857,7 @@ var _ = Describe("Storage Controller", func() {
 				},
 			}
 
-			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient)
+			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(defs).To(HaveLen(2))
 			Expect(backendsClient.getCallCount).To(Equal(1))
@@ -771,7 +886,7 @@ var _ = Describe("Storage Controller", func() {
 				},
 			}
 
-			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient)
+			defs, conns, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, nil)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(defs).To(HaveLen(1))
 			Expect(defs[0].Name).To(Equal("fast"))
@@ -792,7 +907,7 @@ var _ = Describe("Storage Controller", func() {
 				},
 			}
 
-			_, _, err := resolveTierDefinitions(ctx, tiersClient, backendsClient)
+			_, _, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, nil)
 			Expect(err).To(HaveOccurred())
 		})
 
@@ -810,7 +925,7 @@ var _ = Describe("Storage Controller", func() {
 				},
 			}
 
-			_, _, err := resolveTierDefinitions(ctx, tiersClient, backendsClient)
+			_, _, err := resolveTierDefinitions(ctx, tiersClient, backendsClient, nil)
 			Expect(err).To(HaveOccurred())
 		})
 

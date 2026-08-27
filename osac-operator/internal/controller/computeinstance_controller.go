@@ -81,6 +81,10 @@ type ComputeInstanceReconciler struct {
 	// fulfillment service connection. See resolveAndInjectTierContext.
 	TiersClient    StorageTiersLister
 	BackendsClient StorageBackendsClient
+	// SecretsClient resolves a storage backend's password from a referenced Secret
+	// when the backend supplies password_secret instead of an inline password. When
+	// nil, backends that rely on password_secret are skipped. See resolveAndInjectTierContext.
+	SecretsClient SecretsClient
 }
 
 func NewComputeInstanceReconciler(
@@ -622,7 +626,7 @@ func (r *ComputeInstanceReconciler) handleUpdate(ctx context.Context, _ reconcil
 	// provisioning — osac-aap's playbook_osac_create_compute_instance.yml reads
 	// these to provision an on-demand StorageClass when the tenant doesn't
 	// already have one for the requested tier (OSAC-1992).
-	ctx, _ = resolveAndInjectTierContext(ctx, r.TiersClient, r.BackendsClient, "computeInstance", instance.GetName())
+	ctx, _ = resolveAndInjectTierContext(ctx, r.TiersClient, r.BackendsClient, r.SecretsClient, "computeInstance", instance.GetName())
 
 	// Always delegate to provisioning lifecycle — EvaluateAction decides
 	// whether to skip, poll, or trigger. This avoids the A-B-A problem where

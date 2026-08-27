@@ -404,6 +404,7 @@ func setupComputeInstanceControllers(
 	if grpcConn != nil {
 		ciReconciler.TiersClient = privatev1.NewStorageTiersClient(grpcConn)
 		ciReconciler.BackendsClient = privatev1.NewStorageBackendsClient(grpcConn)
+		ciReconciler.SecretsClient = privatev1.NewSecretsClient(grpcConn)
 	}
 	if err := ciReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("computeinstance controller: %w", err)
@@ -490,6 +491,7 @@ func setupStorageController(mgr mcmanager.Manager, grpcConn *grpc.ClientConn, ma
 	if grpcConn != nil {
 		reconciler.BackendsClient = privatev1.NewStorageBackendsClient(grpcConn)
 		reconciler.TiersClient = privatev1.NewStorageTiersClient(grpcConn)
+		reconciler.SecretsClient = privatev1.NewSecretsClient(grpcConn)
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("storage controller: %w", err)

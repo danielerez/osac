@@ -28,6 +28,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
 	"github.com/osac-project/osac/fulfillment-service/internal/references"
+	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 )
 
 type PrivateIdentityProvidersServerBuilder struct {
@@ -37,16 +38,18 @@ type PrivateIdentityProvidersServerBuilder struct {
 	tenancyLogic      auth.TenancyLogic
 	metricsRegisterer prometheus.Registerer
 	filterDesc        protoreflect.MessageDescriptor
+	secretStore       vault.SecretStore
 }
 
 var _ privatev1.IdentityProvidersServer = (*PrivateIdentityProvidersServer)(nil)
 
 type PrivateIdentityProvidersServer struct {
 	privatev1.UnimplementedIdentityProvidersServer
-	logger     *slog.Logger
-	generic    *GenericServer[*privatev1.IdentityProvider]
-	dao        *dao.GenericDAO[*privatev1.IdentityProvider]
-	secretsDao *dao.GenericDAO[*privatev1.Secret]
+	logger      *slog.Logger
+	generic     *GenericServer[*privatev1.IdentityProvider]
+	dao         *dao.GenericDAO[*privatev1.IdentityProvider]
+	secretsDao  *dao.GenericDAO[*privatev1.Secret]
+	secretStore vault.SecretStore
 }
 
 func NewPrivateIdentityProvidersServer() *PrivateIdentityProvidersServerBuilder {
@@ -85,6 +88,14 @@ func (b *PrivateIdentityProvidersServerBuilder) SetFilterDesc(value protoreflect
 	return b
 }
 
+// SetSecretStore sets the Vault secret store used to read the value of a Vault-backed secret
+// referenced by client_secret_secret. It is optional: when unset, the create/update validation
+// only sees data carried in the database column (which covers non-Vault backends and tests).
+func (b *PrivateIdentityProvidersServerBuilder) SetSecretStore(value vault.SecretStore) *PrivateIdentityProvidersServerBuilder {
+	b.secretStore = value
+	return b
+}
+
 func (b *PrivateIdentityProvidersServerBuilder) Build() (result *PrivateIdentityProvidersServer, err error) {
 	// Check parameters:
 	if b.logger == nil {
@@ -98,7 +109,8 @@ func (b *PrivateIdentityProvidersServerBuilder) Build() (result *PrivateIdentity
 
 	// Create the server early so that we can use its functions to set up other objects:
 	s := &PrivateIdentityProvidersServer{
-		logger: b.logger,
+		logger:      b.logger,
+		secretStore: b.secretStore,
 	}
 
 	// Create the generic server:
@@ -310,7 +322,24 @@ func (s *PrivateIdentityProvidersServer) validateClientSecretSecret(
 		s.logger.ErrorContext(ctx, "Failed to load client_secret_secret reference", "error", err)
 		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve client_secret_secret reference")
 	}
-	if value, ok := secretResp.GetObject().GetData()[secretValueKey]; !ok || len(value) == 0 {
+	secret := secretResp.GetObject()
+	data := secret.GetData()
+	// Vault-backed secrets do not carry their data in the database column: the Secrets server nulls
+	// it after writing to Vault. Hydrate the value from the store so this create/update-time check
+	// reads the same value the reconciler later resolves via the Secrets API. Secrets that keep
+	// their data in the database column (non-Vault backends, tests) are validated directly.
+	if len(data) == 0 && s.secretStore != nil &&
+		secret.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT {
+		metadata := secret.GetMetadata()
+		fetched, fetchErr := s.secretStore.Fetch(ctx,
+			metadata.GetTenant(), metadata.GetProject(), metadata.GetName())
+		if fetchErr != nil {
+			s.logger.ErrorContext(ctx, "Failed to load client_secret_secret value from store", "error", fetchErr)
+			return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve client_secret_secret reference")
+		}
+		data = fetched
+	}
+	if value, ok := data[secretValueKey]; !ok || len(value) == 0 {
 		return grpcstatus.Errorf(grpccodes.InvalidArgument,
 			"secret '%s' referenced by client_secret_secret must contain a non-empty '%s' entry",
 			refKey(ref), secretValueKey)

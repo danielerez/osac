@@ -802,4 +802,57 @@ var _ = Describe("Identity provider client_secret_secret", func() {
 		Expect(ok).To(BeTrue())
 		Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 	})
+
+	It("Updates client_secret_secret to another Vault-backed secret", func() {
+		// Both secrets go through the real Secrets API, so their values live in Vault (not the
+		// database column). A successful update proves the update-path validation hydrates the
+		// value from the store, exactly as the create path does.
+		firstSecretId, _ := createClientSecret(ctx, map[string][]byte{"value": []byte("first-client-secret")})
+		secondSecretId, secondSecretName := createClientSecret(ctx,
+			map[string][]byte{"value": []byte("second-client-secret")})
+
+		idpName := fmt.Sprintf("test-update-ref-%s", uuid.New())
+		createResponse, err := client.Create(ctx, privatev1.IdentityProvidersCreateRequest_builder{
+			Object: privatev1.IdentityProvider_builder{
+				Metadata: privatev1.Metadata_builder{
+					Name:   idpName,
+					Tenant: tenantName,
+				}.Build(),
+				Spec: privatev1.IdentityProviderSpec_builder{
+					Title:   "Update Reference Provider",
+					Enabled: true,
+					Oidc: privatev1.OidcConfig_builder{
+						AuthorizationUrl:   "https://oidc.example.com/authorize",
+						TokenUrl:           "https://oidc.example.com/token",
+						ClientId:           "test-client",
+						ClientSecretSecret: privatev1.SecretLocalReference_builder{Id: firstSecretId}.Build(),
+						Issuer:             "https://oidc.example.com",
+					}.Build(),
+				}.Build(),
+			}.Build(),
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		idpID := createResponse.GetObject().GetId()
+		DeferCleanup(func() {
+			_, _ = client.Delete(ctx, privatev1.IdentityProvidersDeleteRequest_builder{
+				Id: idpID,
+			}.Build())
+		})
+
+		updateResponse, err := client.Update(ctx, privatev1.IdentityProvidersUpdateRequest_builder{
+			Object: privatev1.IdentityProvider_builder{
+				Id: idpID,
+				Spec: privatev1.IdentityProviderSpec_builder{
+					Oidc: privatev1.OidcConfig_builder{
+						ClientSecretSecret: privatev1.SecretLocalReference_builder{Id: secondSecretId}.Build(),
+					}.Build(),
+				}.Build(),
+			}.Build(),
+			UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.oidc.client_secret_secret"}},
+		}.Build())
+		Expect(err).ToNot(HaveOccurred())
+		ref := updateResponse.GetObject().GetSpec().GetOidc().GetClientSecretSecret()
+		Expect(ref.GetId()).To(Equal(secondSecretId))
+		Expect(ref.GetName()).To(Equal(secondSecretName))
+	})
 })

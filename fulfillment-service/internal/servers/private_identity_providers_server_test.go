@@ -15,6 +15,7 @@ package servers
 
 import (
 	"context"
+	"fmt"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,6 +30,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
+	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 )
 
 var _ = Describe("Private identity providers server", func() {
@@ -901,6 +903,119 @@ var _ = Describe("Private identity providers server", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
 			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("value"))
+		})
+	})
+
+	Describe("Client secret secret Vault hydration", func() {
+		var (
+			server    *PrivateIdentityProvidersServer
+			mockStore *vault.MockSecretStore
+		)
+
+		BeforeEach(func() {
+			var err error
+			mockStore = vault.NewMockSecretStore(ctrl)
+			server, err = NewPrivateIdentityProvidersServer().
+				SetLogger(logger).
+				SetAttributionLogic(attribution).
+				SetTenancyLogic(tenancy).
+				SetSecretStore(mockStore).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			secretsDao, err := dao.NewGenericDAO[*privatev1.Secret]().
+				SetLogger(logger).
+				SetTenancyLogic(tenancy).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+
+			// A Vault-backed secret carries no data in the database column: the Secrets server nulls it
+			// after writing to Vault. This mirrors what validateClientSecretSecret loads via the DAO, so
+			// the value must be hydrated from the store.
+			_, err = secretsDao.Create().SetObject(privatev1.Secret_builder{
+				Id: "vault-secret-id",
+				Metadata: privatev1.Metadata_builder{
+					Name:   "vault-secret-name",
+					Tenant: testTenant,
+				}.Build(),
+				Backend: privatev1.SecretBackend_SECRET_BACKEND_VAULT,
+			}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		createIdp := func(oidc *privatev1.OidcConfig) (*privatev1.IdentityProvidersCreateResponse, error) {
+			return server.Create(ctx, privatev1.IdentityProvidersCreateRequest_builder{
+				Object: privatev1.IdentityProvider_builder{
+					Metadata: privatev1.Metadata_builder{
+						Name:   "test-oidc",
+						Tenant: "my-tenant",
+					}.Build(),
+					Spec: privatev1.IdentityProviderSpec_builder{
+						Title:   "Test OIDC",
+						Enabled: true,
+						Oidc:    oidc,
+					}.Build(),
+				}.Build(),
+			}.Build())
+		}
+
+		It("Hydrates the value from the store and creates when the database column is empty", func() {
+			// The DAO returns an empty data column for the Vault-backed secret, so the validation must
+			// fetch the value from the store using the secret's tenant/project/name.
+			mockStore.EXPECT().
+				Fetch(gomock.Any(), testTenant, "", "vault-secret-name").
+				Return(map[string][]byte{"value": []byte("resolved-from-vault")}, nil)
+
+			response, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "vault-secret-id",
+				}.Build(),
+			}.Build())
+			Expect(err).ToNot(HaveOccurred())
+			ref := response.GetObject().GetSpec().GetOidc().GetClientSecretSecret()
+			Expect(ref.GetId()).To(Equal("vault-secret-id"))
+			Expect(ref.GetName()).To(Equal("vault-secret-name"))
+		})
+
+		It("Rejects create when the value hydrated from the store has no value entry", func() {
+			mockStore.EXPECT().
+				Fetch(gomock.Any(), testTenant, "", "vault-secret-name").
+				Return(map[string][]byte{"wrong-key": []byte("nope")}, nil)
+
+			_, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "vault-secret-id",
+				}.Build(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("value"))
+		})
+
+		It("Returns Internal when the store fails to load the value", func() {
+			mockStore.EXPECT().
+				Fetch(gomock.Any(), testTenant, "", "vault-secret-name").
+				Return(nil, fmt.Errorf("vault unavailable"))
+
+			_, err := createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "vault-secret-id",
+				}.Build(),
+			}.Build())
+			Expect(err).To(HaveOccurred())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.Internal))
 		})
 	})
 })

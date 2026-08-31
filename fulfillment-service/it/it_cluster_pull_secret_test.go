@@ -174,7 +174,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		clusterId := response.GetObject().GetId()
-		DeferCleanup(func() {
+		DeferCleanup(func(ctx context.Context) {
 			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{Id: clusterId}.Build())
 		})
 
@@ -202,7 +202,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		clusterId := response.GetObject().GetId()
-		DeferCleanup(func() {
+		DeferCleanup(func(ctx context.Context) {
 			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{Id: clusterId}.Build())
 		})
 
@@ -282,7 +282,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		clusterId := response.GetObject().GetId()
-		DeferCleanup(func() {
+		DeferCleanup(func(ctx context.Context) {
 			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{Id: clusterId}.Build())
 		})
 
@@ -346,7 +346,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		clusterId := response.GetObject().GetId()
-		DeferCleanup(func() {
+		DeferCleanup(func(ctx context.Context) {
 			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{Id: clusterId}.Build())
 		})
 
@@ -377,7 +377,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		}.Build())
 		Expect(err).ToNot(HaveOccurred())
 		clusterId := response.GetObject().GetId()
-		DeferCleanup(func() {
+		DeferCleanup(func(ctx context.Context) {
 			_, _ = clustersClient.Delete(ctx, publicv1.ClustersDeleteRequest_builder{Id: clusterId}.Build())
 		})
 

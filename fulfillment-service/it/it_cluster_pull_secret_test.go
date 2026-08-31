@@ -20,7 +20,6 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"google.golang.org/grpc"
 	grpccodes "google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
@@ -155,7 +154,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		Expect(err).ToNot(HaveOccurred())
 	})
 
-	It("resolves pull_secret_secret by id into the ClusterOrder pull secret", func() {
+	It("Resolves pull_secret_secret by id into the ClusterOrder pull secret", func() {
 		secretId, _ := createSecret(ctx, map[string][]byte{".dockerconfigjson": []byte(dockerConfigJSON)})
 		templateId := createTemplate(ctx, nil)
 
@@ -183,7 +182,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		Expect(kubeObject.Spec.PullSecret).To(Equal(dockerConfigJSON))
 	})
 
-	It("resolves pull_secret_secret by name into the ClusterOrder pull secret", func() {
+	It("Resolves pull_secret_secret by name into the ClusterOrder pull secret", func() {
 		_, secretName := createSecret(ctx, map[string][]byte{".dockerconfigjson": []byte(dockerConfigJSON)})
 		templateId := createTemplate(ctx, nil)
 
@@ -211,7 +210,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		Expect(kubeObject.Spec.PullSecret).To(Equal(dockerConfigJSON))
 	})
 
-	It("rejects a cluster that sets both pull_secret and pull_secret_secret", func() {
+	It("Rejects a cluster that sets both pull_secret and pull_secret_secret", func() {
 		secretId, _ := createSecret(ctx, map[string][]byte{".dockerconfigjson": []byte(dockerConfigJSON)})
 		templateId := createTemplate(ctx, nil)
 
@@ -236,7 +235,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 	})
 
-	It("rejects a cluster that references a nonexistent secret", func() {
+	It("Rejects a cluster that references a nonexistent secret", func() {
 		templateId := createTemplate(ctx, nil)
 
 		_, err := clustersClient.Create(ctx, publicv1.ClustersCreateRequest_builder{
@@ -261,7 +260,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 	})
 
-	It("reports SecretResolutionFailed and creates no ClusterOrder when the secret lacks .dockerconfigjson", func() {
+	It("Reports SecretResolutionFailed and creates no ClusterOrder when the secret lacks .dockerconfigjson", func() {
 		// The secret exists (so create-time existence validation passes) but has the wrong shape,
 		// so the reconciler fails to resolve it.
 		secretId, _ := createSecret(ctx, map[string][]byte{"wrong-key": []byte("nope")})
@@ -325,7 +324,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		).Should(Succeed())
 	})
 
-	It("propagates a template default pull_secret_secret into the ClusterOrder", func() {
+	It("Propagates a template default pull_secret_secret into the ClusterOrder", func() {
 		secretId, _ := createSecret(ctx, map[string][]byte{".dockerconfigjson": []byte(dockerConfigJSON)})
 		templateId := createTemplate(ctx, privatev1.ClusterTemplateSpecDefaults_builder{
 			PullSecretSecret: privatev1.SecretLocalReference_builder{Id: secretId}.Build(),
@@ -355,7 +354,7 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		Expect(kubeObject.Spec.PullSecret).To(Equal(dockerConfigJSON))
 	})
 
-	It("lets a user inline pull_secret override a template default pull_secret_secret", func() {
+	It("Lets a user inline pull_secret override a template default pull_secret_secret", func() {
 		secretId, _ := createSecret(ctx, map[string][]byte{".dockerconfigjson": []byte(dockerConfigJSON)})
 		templateId := createTemplate(ctx, privatev1.ClusterTemplateSpecDefaults_builder{
 			PullSecretSecret: privatev1.SecretLocalReference_builder{Id: secretId}.Build(),
@@ -386,6 +385,3 @@ var _ = Describe("Cluster pull_secret_secret", Label("secrets", "cluster"), func
 		Expect(kubeObject.Spec.PullSecret).To(Equal(inlinePullSecret))
 	})
 })
-
-// ensure grpc import is retained for status parsing helpers used above.
-var _ = grpc.ClientConn{}

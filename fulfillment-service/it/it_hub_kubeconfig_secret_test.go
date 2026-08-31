@@ -127,7 +127,7 @@ var _ = Describe("Hub kubeconfig_secret", Label("secrets", "hub"), func() {
 		return response.GetObject(), err
 	}
 
-	It("accepts a hub referencing kubeconfig_secret by id and writes back the resolved ref", func() {
+	It("Accepts a hub referencing kubeconfig_secret by id and writes back the resolved ref", func() {
 		secretId, secretName := createKubeconfigSecret(ctx, map[string][]byte{
 			"kubeconfig": []byte(sampleHubKubeconfig),
 		})
@@ -145,7 +145,7 @@ var _ = Describe("Hub kubeconfig_secret", Label("secrets", "hub"), func() {
 		Expect(ref.GetName()).To(Equal(secretName))
 	})
 
-	It("accepts a hub referencing kubeconfig_secret by name and resolves the id", func() {
+	It("Accepts a hub referencing kubeconfig_secret by name and resolves the id", func() {
 		secretId, secretName := createKubeconfigSecret(ctx, map[string][]byte{
 			"kubeconfig": []byte(sampleHubKubeconfig),
 		})
@@ -162,7 +162,7 @@ var _ = Describe("Hub kubeconfig_secret", Label("secrets", "hub"), func() {
 		Expect(ref.GetName()).To(Equal(secretName))
 	})
 
-	It("rejects a hub that sets both kubeconfig and kubeconfig_secret", func() {
+	It("Rejects a hub that sets both kubeconfig and kubeconfig_secret", func() {
 		secretId, _ := createKubeconfigSecret(ctx, map[string][]byte{
 			"kubeconfig": []byte(sampleHubKubeconfig),
 		})
@@ -178,7 +178,7 @@ var _ = Describe("Hub kubeconfig_secret", Label("secrets", "hub"), func() {
 		Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 	})
 
-	It("rejects a hub referencing a nonexistent secret", func() {
+	It("Rejects a hub referencing a nonexistent secret", func() {
 		_, err := createHub(ctx, privatev1.HubSpec_builder{
 			Namespace:        fmt.Sprintf("test-hub-ns-%s", uuid.New()[24:32]),
 			KubeconfigSecret: privatev1.SecretLocalReference_builder{Id: uuid.New()}.Build(),
@@ -189,7 +189,7 @@ var _ = Describe("Hub kubeconfig_secret", Label("secrets", "hub"), func() {
 		Expect(status.Code()).To(Equal(grpccodes.InvalidArgument))
 	})
 
-	It("rejects updating kubeconfig while kubeconfig_secret is set", func() {
+	It("Rejects updating kubeconfig while kubeconfig_secret is set", func() {
 		secretId, _ := createKubeconfigSecret(ctx, map[string][]byte{
 			"kubeconfig": []byte(sampleHubKubeconfig),
 		})

@@ -6,6 +6,8 @@ import yaml
 from ansible.errors import AnsibleFilterError
 
 from find_template_roles import (
+    ClusterTemplate,
+    ClusterTemplateSpecDefaults,
     Metadata,
     ProtobufAnyValue,
     ProtobufType,
@@ -265,6 +267,25 @@ class TestMetadataTemplateTypes:
         metadata = _load_metadata(roles_dir, "ocp_virt_vm")
         assert metadata.spec_defaults is not None
         assert metadata.spec_defaults["boot_disk"] is not None
+
+    def test_cluster_pull_secret_reference_serialization(self):
+        defaults = ClusterTemplateSpecDefaults.model_validate(
+            {"pull_secret_secret": {"name": "shared-pull-secret"}}
+        )
+
+        template = ClusterTemplate(
+            collection="osac.service",
+            path=Path("roles/ocp_small"),
+            name="ocp_small",
+            parameters=[],
+            spec_defaults=defaults,
+        )
+        dumped = template.model_dump(mode="json", exclude_none=True)
+
+        assert dumped["metadata"] == {"name": "ocp-small", "tenant": "shared"}
+        assert dumped["spec_defaults"] == {
+            "pull_secret_secret": {"name": "shared-pull-secret"}
+        }
 
     def test_cluster_with_parameters(self, roles_dir):
         metadata = _load_metadata(roles_dir, "ocp_4_20_ai_maas")

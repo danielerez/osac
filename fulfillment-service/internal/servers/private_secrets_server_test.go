@@ -27,6 +27,8 @@ import (
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/collections"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/events"
@@ -641,6 +643,110 @@ var _ = Describe("Private secrets server", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(response.GetObject().GetBackend()).To(Equal(
 					privatev1.SecretBackend_SECRET_BACKEND_HUB))
+			})
+		})
+
+		Describe("Shared Secret authorization", func() {
+			newTenantUserServer := func() *PrivateSecretsServer {
+				visibility, err := auth.NewVisibility().
+					AddVisibleTenants(auth.SharedTenant, testTenant).
+					Build()
+				Expect(err).ToNot(HaveOccurred())
+				restrictedTenancy := auth.NewMockTenancyLogic(ctrl)
+				restrictedTenancy.EXPECT().DetermineAssignableTenants(gomock.Any()).
+					Return(collections.NewSet(testTenant), nil).
+					AnyTimes()
+				restrictedTenancy.EXPECT().DetermineDefaultTenant(gomock.Any()).
+					Return(testTenant, nil).
+					AnyTimes()
+				restrictedTenancy.EXPECT().DetermineVisibility(gomock.Any()).
+					Return(visibility, nil).
+					AnyTimes()
+
+				restrictedServer, buildErr := NewPrivateSecretsServer().
+					SetLogger(logger).
+					SetAttributionLogic(attribution).
+					SetTenancyLogic(restrictedTenancy).
+					SetSecretStore(mockStore).
+					SetHubSecretFetcher(mockHubSecretFetcher).
+					Build()
+				Expect(buildErr).ToNot(HaveOccurred())
+				return restrictedServer
+			}
+
+			createSharedSecret := func(name string) *privatev1.Secret {
+				mockStore.EXPECT().
+					Store(gomock.Any(), auth.SharedTenant, "", name, gomock.Any()).
+					Return(nil)
+				response, err := server.Create(ctx, privatev1.SecretsCreateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name:   name,
+							Tenant: auth.SharedTenant,
+						}.Build(),
+						Data: map[string][]byte{"key": []byte("value")},
+					}.Build(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				return response.GetObject()
+			}
+
+			It("allows a platform administrator to create and retrieve a shared Vault Secret", func() {
+				created := createSharedSecret("shared-admin-secret")
+				mockStore.EXPECT().
+					Fetch(gomock.Any(), auth.SharedTenant, "", "shared-admin-secret").
+					Return(map[string][]byte{"key": []byte("value")}, nil)
+
+				response, err := server.Get(ctx, privatev1.SecretsGetRequest_builder{
+					Id: created.GetId(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(response.GetObject().GetData()).To(HaveKey("key"))
+			})
+
+			It("rejects a tenant user's shared Secret create before writing to Vault", func() {
+				restrictedServer := newTenantUserServer()
+				_, err := restrictedServer.Create(ctx, privatev1.SecretsCreateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name:   "rejected-shared-secret",
+							Tenant: auth.SharedTenant,
+						}.Build(),
+						Data: map[string][]byte{"key": []byte("value")},
+					}.Build(),
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
+			})
+
+			It("lets tenant users see shared metadata but not retrieve or mutate its data", func() {
+				created := createSharedSecret("shared-protected-secret")
+				restrictedServer := newTenantUserServer()
+
+				list, err := restrictedServer.List(ctx, privatev1.SecretsListRequest_builder{
+					Filter: new("this.id == '" + created.GetId() + "'"),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(list.GetItems()).To(HaveLen(1))
+				Expect(list.GetItems()[0].GetData()).To(BeEmpty())
+
+				_, err = restrictedServer.Get(ctx, privatev1.SecretsGetRequest_builder{
+					Id: created.GetId(),
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
+
+				_, err = restrictedServer.Update(ctx, privatev1.SecretsUpdateRequest_builder{
+					Object: privatev1.Secret_builder{
+						Id:   created.GetId(),
+						Data: map[string][]byte{"key": []byte("changed")},
+					}.Build(),
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"data"}},
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
+
+				_, err = restrictedServer.Delete(ctx, privatev1.SecretsDeleteRequest_builder{
+					Id: created.GetId(),
+				}.Build())
+				Expect(status.Code(err)).To(Equal(codes.PermissionDenied))
 			})
 		})
 

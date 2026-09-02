@@ -28,6 +28,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	privatev1 "github.com/osac-project/osac/fulfillment-service/internal/api/osac/private/v1"
+	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 )
@@ -3151,6 +3152,36 @@ var _ = Describe("Private clusters server", func() {
 				Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("no secret"))
 			})
 
+			It("Rejects a directly supplied shared pull_secret_secret reference", func() {
+				_, err := secretsDao.Create().SetObject(privatev1.Secret_builder{
+					Id: "shared-secret-direct-id",
+					Metadata: privatev1.Metadata_builder{
+						Name:   "shared-secret-direct",
+						Tenant: auth.SharedTenant,
+					}.Build(),
+				}.Build()).Do(ctx)
+				Expect(err).ToNot(HaveOccurred())
+
+				_, err = server.Create(ctx, privatev1.ClustersCreateRequest_builder{
+					Object: privatev1.Cluster_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name: fmt.Sprintf("test-%s", uuid.New()[24:32]),
+						}.Build(),
+						Spec: privatev1.ClusterSpec_builder{
+							Template: privatev1.ClusterTemplateReference_builder{Id: "my-template-id"}.Build(),
+							NodeSets: map[string]*privatev1.ClusterNodeSet{
+								"compute": privatev1.ClusterNodeSet_builder{Size: proto.Int32(3)}.Build(),
+								"gpu":     privatev1.ClusterNodeSet_builder{Size: proto.Int32(1)}.Build(),
+							},
+							PullSecretSecret: privatev1.SecretLocalReference_builder{Id: "shared-secret-direct-id"}.Build(),
+						}.Build(),
+						Status: privatev1.ClusterStatus_builder{Hub: "my-hub-id"}.Build(),
+					}.Build(),
+				}.Build())
+				Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+				Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("inherited from a shared cluster template"))
+			})
+
 			It("Creates a cluster with inline pull_secret when pull_secret_secret is not set", func() {
 				response, err := server.Create(ctx, privatev1.ClustersCreateRequest_builder{
 					Object: privatev1.Cluster_builder{
@@ -3341,6 +3372,81 @@ var _ = Describe("Private clusters server", func() {
 				Expect(err).ToNot(HaveOccurred())
 				Expect(response.GetObject().GetSpec().GetPullSecretSecret()).ToNot(BeNil())
 				Expect(response.GetObject().GetSpec().GetPullSecretSecret().GetId()).To(Equal("my-secret-id"))
+			})
+
+			It("inherits a canonical shared pull Secret when a tenant Secret has the same name", func() {
+				_, err := secretsDao.Create().SetObject(privatev1.Secret_builder{
+					Id: "shared-pull-secret-id",
+					Metadata: privatev1.Metadata_builder{
+						Name:   "my-secret-name",
+						Tenant: auth.SharedTenant,
+					}.Build(),
+				}.Build()).Do(ctx)
+				Expect(err).ToNot(HaveOccurred())
+
+				templatesDao, err := dao.NewGenericDAO[*privatev1.ClusterTemplate]().
+					SetLogger(logger).
+					SetTenancyLogic(tenancy).
+					Build()
+				Expect(err).ToNot(HaveOccurred())
+				_, err = templatesDao.Create().SetObject(privatev1.ClusterTemplate_builder{
+					Id: "shared-template-with-secret-ref",
+					Metadata: privatev1.Metadata_builder{
+						Name:   "shared-template-with-secret-ref",
+						Tenant: auth.SharedTenant,
+					}.Build(),
+					Title:       "Shared template with pull Secret",
+					Description: "Shared template with a canonical pull Secret reference",
+					NodeSets: map[string]*privatev1.ClusterTemplateNodeSet{
+						"compute": privatev1.ClusterTemplateNodeSet_builder{
+							HostType: privatev1.HostTypeReference_builder{Id: "acme-1ti-id"}.Build(),
+							Size:     3,
+						}.Build(),
+					},
+					SpecDefaults: privatev1.ClusterTemplateSpecDefaults_builder{
+						PullSecretSecret: privatev1.SecretLocalReference_builder{
+							Id:   "shared-pull-secret-id",
+							Name: "my-secret-name",
+						}.Build(),
+					}.Build(),
+				}.Build()).Do(ctx)
+				Expect(err).ToNot(HaveOccurred())
+
+				response, err := server.Create(ctx, privatev1.ClustersCreateRequest_builder{
+					Object: privatev1.Cluster_builder{
+						Metadata: privatev1.Metadata_builder{
+							Name: fmt.Sprintf("test-%s", uuid.New()[24:32]),
+						}.Build(),
+						Spec: privatev1.ClusterSpec_builder{
+							Template: privatev1.ClusterTemplateReference_builder{
+								Id: "shared-template-with-secret-ref",
+							}.Build(),
+							NodeSets: map[string]*privatev1.ClusterNodeSet{
+								"compute": privatev1.ClusterNodeSet_builder{Size: proto.Int32(3)}.Build(),
+							},
+						}.Build(),
+						Status: privatev1.ClusterStatus_builder{Hub: "my-hub-id"}.Build(),
+					}.Build(),
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(response.GetObject().GetSpec().GetPullSecretSecret().GetId()).
+					To(Equal("shared-pull-secret-id"))
+
+				updateResponse, err := server.Update(ctx, privatev1.ClustersUpdateRequest_builder{
+					Object: privatev1.Cluster_builder{
+						Id: response.GetObject().GetId(),
+						Spec: privatev1.ClusterSpec_builder{
+							PullSecretSecret: privatev1.SecretLocalReference_builder{
+								Id:   "shared-pull-secret-id",
+								Name: "my-secret-name",
+							}.Build(),
+						}.Build(),
+					}.Build(),
+					UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.pull_secret_secret"}},
+				}.Build())
+				Expect(err).ToNot(HaveOccurred())
+				Expect(updateResponse.GetObject().GetSpec().GetPullSecretSecret().GetId()).
+					To(Equal("shared-pull-secret-id"))
 			})
 
 			It("User-provided pull_secret overrides template pull_secret_secret default", func() {

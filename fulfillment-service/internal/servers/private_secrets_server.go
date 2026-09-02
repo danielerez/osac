@@ -127,6 +127,7 @@ func (b *PrivateSecretsServerBuilder) Build() (result *PrivateSecretsServer, err
 		SetTenancyLogic(b.tenancyLogic).
 		SetMetricsRegisterer(b.metricsRegisterer).
 		SetFilterDesc(b.filterDesc).
+		AddAllowedTenants(auth.SharedTenant).
 		Build()
 	if err != nil {
 		return
@@ -158,6 +159,9 @@ func (s *PrivateSecretsServer) Get(ctx context.Context,
 	}
 
 	obj := response.GetObject()
+	if err = s.authorizeSharedSecretManagement(ctx, obj); err != nil {
+		return
+	}
 	if s.secretStore != nil && obj.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT {
 		tenant := obj.GetMetadata().GetTenant()
 		project := obj.GetMetadata().GetProject()
@@ -206,25 +210,47 @@ func (s *PrivateSecretsServer) Create(ctx context.Context,
 		secret.SetBackend(privatev1.SecretBackend_SECRET_BACKEND_VAULT)
 	}
 
-	if s.secretStore != nil && secret.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT {
-		tenant, tenantErr := s.determineTenant(ctx, secret)
-		if tenantErr != nil {
-			err = tenantErr
-			return
-		}
-		project := secret.GetMetadata().GetProject()
-		name := secret.GetMetadata().GetName()
-
-		err = s.secretStore.Store(ctx, tenant, project, name, secret.GetData())
-		if err != nil {
-			err = vault.ToGrpcError(err)
-			return
-		}
-
+	persistInVault := s.secretStore != nil && secret.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT
+	var data map[string][]byte
+	if persistInVault {
+		data = secret.GetData()
 		secret.SetData(nil)
 	}
 
-	err = s.generic.Create(ctx, request, &response)
+	create := func(opCtx context.Context) error {
+		if createErr := s.generic.Create(opCtx, request, &response); createErr != nil {
+			return createErr
+		}
+		created := response.GetObject()
+		if authErr := s.authorizeSharedSecretManagement(opCtx, created); authErr != nil {
+			return authErr
+		}
+		if created.GetMetadata().GetTenant() == auth.SharedTenant {
+			if created.GetBackend() != privatev1.SecretBackend_SECRET_BACKEND_VAULT {
+				return grpcstatus.Errorf(grpccodes.InvalidArgument, "shared Secrets must use the Vault backend")
+			}
+			if s.secretStore == nil {
+				return grpcstatus.Errorf(grpccodes.FailedPrecondition,
+					"shared Secrets require a configured Vault backend")
+			}
+		}
+		if !persistInVault || isDryRun(opCtx) {
+			return nil
+		}
+		storeErr := s.secretStore.Store(
+			opCtx,
+			created.GetMetadata().GetTenant(),
+			created.GetMetadata().GetProject(),
+			created.GetMetadata().GetName(),
+			data,
+		)
+		return vault.ToGrpcError(storeErr)
+	}
+
+	err = s.withSavepoint(ctx, create)
+	if err != nil {
+		response = nil
+	}
 	return
 }
 
@@ -245,30 +271,45 @@ func (s *PrivateSecretsServer) Update(ctx context.Context,
 	}
 
 	existingSecret := getResponse.GetObject()
+	if err = s.authorizeSharedSecretManagement(ctx, existingSecret); err != nil {
+		return
+	}
 
 	err = s.validateSecretUpdate(ctx, request.GetObject(), existingSecret)
 	if err != nil {
 		return
 	}
 
-	if s.secretStore != nil &&
+	persistInVault := s.secretStore != nil &&
 		existingSecret.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT &&
-		len(request.GetObject().GetData()) > 0 {
-
-		tenant := existingSecret.GetMetadata().GetTenant()
-		project := existingSecret.GetMetadata().GetProject()
-		name := existingSecret.GetMetadata().GetName()
-
-		err = s.secretStore.Store(ctx, tenant, project, name, request.GetObject().GetData())
-		if err != nil {
-			err = vault.ToGrpcError(err)
-			return
-		}
-
+		len(request.GetObject().GetData()) > 0
+	var data map[string][]byte
+	if persistInVault {
+		data = request.GetObject().GetData()
 		request.GetObject().SetData(nil)
 	}
 
-	err = s.generic.Update(ctx, request, &response)
+	update := func(opCtx context.Context) error {
+		if updateErr := s.generic.Update(opCtx, request, &response); updateErr != nil {
+			return updateErr
+		}
+		if !persistInVault || isDryRun(opCtx) {
+			return nil
+		}
+		storeErr := s.secretStore.Store(
+			opCtx,
+			existingSecret.GetMetadata().GetTenant(),
+			existingSecret.GetMetadata().GetProject(),
+			existingSecret.GetMetadata().GetName(),
+			data,
+		)
+		return vault.ToGrpcError(storeErr)
+	}
+
+	err = s.withSavepoint(ctx, update)
+	if err != nil {
+		response = nil
+	}
 	return
 }
 
@@ -280,16 +321,16 @@ func (s *PrivateSecretsServer) Delete(ctx context.Context,
 		defer tx.ReportError(&err)
 	}
 
-	var obj *privatev1.Secret
-	if s.secretStore != nil {
-		getRequest := &privatev1.SecretsGetRequest{}
-		getRequest.SetId(request.GetId())
-		var getResponse *privatev1.SecretsGetResponse
-		err = s.generic.Get(ctx, getRequest, &getResponse)
-		if err != nil {
-			return
-		}
-		obj = getResponse.GetObject()
+	getRequest := &privatev1.SecretsGetRequest{}
+	getRequest.SetId(request.GetId())
+	var getResponse *privatev1.SecretsGetResponse
+	err = s.generic.Get(ctx, getRequest, &getResponse)
+	if err != nil {
+		return
+	}
+	obj := getResponse.GetObject()
+	if err = s.authorizeSharedSecretManagement(ctx, obj); err != nil {
+		return
 	}
 
 	err = s.generic.Delete(ctx, request, &response)
@@ -297,7 +338,7 @@ func (s *PrivateSecretsServer) Delete(ctx context.Context,
 		return
 	}
 
-	if obj != nil && obj.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT {
+	if s.secretStore != nil && obj != nil && obj.GetBackend() == privatev1.SecretBackend_SECRET_BACKEND_VAULT {
 		tenant := obj.GetMetadata().GetTenant()
 		project := obj.GetMetadata().GetProject()
 		name := obj.GetMetadata().GetName()
@@ -312,8 +353,53 @@ func (s *PrivateSecretsServer) Delete(ctx context.Context,
 	return
 }
 
+// authorizeSharedSecretManagement restricts decrypted reads and mutations of shared Secrets to
+// platform administrators and controllers. Both identities have universal tenant scope. Metadata
+// remains listable so shared template references can be resolved without exposing credential data.
+func (s *PrivateSecretsServer) authorizeSharedSecretManagement(ctx context.Context, secret *privatev1.Secret) error {
+	if secret == nil || secret.GetMetadata().GetTenant() != auth.SharedTenant {
+		return nil
+	}
+	allowed, err := s.canManageSharedSecrets(ctx)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return grpcstatus.Errorf(
+			grpccodes.PermissionDenied,
+			"shared Secrets can only be read or managed by platform administrators and controllers",
+		)
+	}
+	return nil
+}
+
+func (s *PrivateSecretsServer) canManageSharedSecrets(ctx context.Context) (bool, error) {
+	assignable, err := s.tenancyLogic.DetermineAssignableTenants(ctx)
+	if err != nil {
+		return false, grpcstatus.Errorf(grpccodes.Internal, "failed to determine shared Secret access")
+	}
+	return assignable.Universal(), nil
+}
+
+func (s *PrivateSecretsServer) withSavepoint(ctx context.Context, operation func(context.Context) error) error {
+	tx, err := database.TxFromContext(ctx)
+	if err != nil {
+		return operation(ctx)
+	}
+	return tx.Savepoint(ctx, operation)
+}
+
 func (s *PrivateSecretsServer) Signal(ctx context.Context,
 	request *privatev1.SecretsSignalRequest) (response *privatev1.SecretsSignalResponse, err error) {
+	getRequest := &privatev1.SecretsGetRequest{}
+	getRequest.SetId(request.GetId())
+	var getResponse *privatev1.SecretsGetResponse
+	if err = s.generic.Get(ctx, getRequest, &getResponse); err != nil {
+		return
+	}
+	if err = s.authorizeSharedSecretManagement(ctx, getResponse.GetObject()); err != nil {
+		return
+	}
 	err = s.generic.Signal(ctx, request, &response)
 	return
 }
@@ -357,17 +443,6 @@ func (s *PrivateSecretsServer) validateHubSecretCreate(secret *privatev1.Secret)
 			"field 'data' must be empty when backend is HUB")
 	}
 	return nil
-}
-
-func (s *PrivateSecretsServer) determineTenant(ctx context.Context, secret *privatev1.Secret) (string, error) {
-	if t := secret.GetMetadata().GetTenant(); t != "" {
-		return t, nil
-	}
-	t, err := s.tenancyLogic.DetermineDefaultTenant(ctx)
-	if err != nil {
-		return "", grpcstatus.Errorf(grpccodes.Internal, "failed to determine tenant: %v", err)
-	}
-	return t, nil
 }
 
 func (s *PrivateSecretsServer) validateSecretUpdate(_ context.Context,

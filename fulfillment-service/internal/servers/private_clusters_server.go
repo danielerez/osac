@@ -431,7 +431,20 @@ func (s *PrivateClustersServer) Update(ctx context.Context,
 	if err = s.validatePullSecretMutualExclusionForUpdate(ctx, request); err != nil {
 		return
 	}
-	if err = s.validatePullSecretSecret(ctx, request.GetObject().GetSpec()); err != nil {
+	allowExistingSharedRef := false
+	requestedRef := request.GetObject().GetSpec().GetPullSecretSecret()
+	if requestedRef != nil && requestedRef.GetId() != "" {
+		existing, found, lookupErr := s.getExistingCluster(ctx, request)
+		if lookupErr != nil {
+			err = lookupErr
+			return
+		}
+		allowExistingSharedRef = found &&
+			existing.GetSpec().GetPullSecretSecret().GetId() == requestedRef.GetId()
+	}
+	if err = s.validatePullSecretSecret(
+		ctx, request.GetObject().GetSpec(), allowExistingSharedRef,
+	); err != nil {
 		return
 	}
 	if err = utils.ValidateClusterSpecFields(request.GetObject().GetSpec()); err != nil {
@@ -641,7 +654,9 @@ func (s *PrivateClustersServer) validatePullSecretMutualExclusionForUpdate(
 	return nil
 }
 
-func (s *PrivateClustersServer) validatePullSecretSecret(ctx context.Context, spec *privatev1.ClusterSpec) error {
+func (s *PrivateClustersServer) validatePullSecretSecret(
+	ctx context.Context, spec *privatev1.ClusterSpec, allowShared bool,
+) error {
 	ref := spec.GetPullSecretSecret()
 	if ref == nil {
 		return nil
@@ -662,6 +677,10 @@ func (s *PrivateClustersServer) validatePullSecretSecret(ctx context.Context, sp
 		}
 		s.logger.ErrorContext(ctx, "Failed to resolve pull_secret_secret reference", "error", err)
 		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve pull_secret_secret reference")
+	}
+	if resolved.Tenant == auth.SharedTenant && !allowShared {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"shared pull_secret_secret references must be inherited from a shared cluster template")
 	}
 	resolvedRef := &privatev1.SecretLocalReference{}
 	resolvedRef.SetId(resolved.ID)
@@ -1359,6 +1378,12 @@ func (s *PrivateClustersServer) validateAndTransformCluster(ctx context.Context,
 		return grpcstatus.Errorf(grpccodes.InvalidArgument, "template '%s' has been deleted", templateRefStr)
 	}
 
+	// Only a pull secret inherited from a shared template may cross the tenant boundary. Direct
+	// shared SecretLocalReference values on tenant clusters stay local.
+	inheritsPullSecretSecret := cluster.GetSpec().GetPullSecretSecret() == nil &&
+		template.GetMetadata().GetTenant() == auth.SharedTenant &&
+		template.GetSpecDefaults().GetPullSecretSecret() != nil
+
 	// Apply spec defaults from the template (user values take precedence):
 	utils.ApplyClusterSpecDefaults(cluster.GetSpec(), template.GetSpecDefaults())
 
@@ -1368,7 +1393,7 @@ func (s *PrivateClustersServer) validateAndTransformCluster(ctx context.Context,
 	}
 
 	// Validate pull_secret_secret reference exists:
-	if err = s.validatePullSecretSecret(ctx, cluster.GetSpec()); err != nil {
+	if err = s.validatePullSecretSecret(ctx, cluster.GetSpec(), inheritsPullSecretSecret); err != nil {
 		return err
 	}
 
@@ -1612,13 +1637,17 @@ func (s *PrivateClustersServer) validateAndTransformCatalogItem(ctx context.Cont
 	resolvedTemplateRef.SetName(template.GetMetadata().GetName())
 	cluster.GetSpec().SetTemplate(resolvedTemplateRef)
 
+	inheritsPullSecretSecret := cluster.GetSpec().GetPullSecretSecret() == nil &&
+		template.GetMetadata().GetTenant() == auth.SharedTenant &&
+		template.GetSpecDefaults().GetPullSecretSecret() != nil
+
 	// Apply spec defaults from the template (user and field_definition values take precedence):
 	utils.ApplyClusterSpecDefaults(cluster.GetSpec(), template.GetSpecDefaults())
 
 	if err := s.validatePullSecretMutualExclusion(cluster.GetSpec()); err != nil {
 		return err
 	}
-	if err := s.validatePullSecretSecret(ctx, cluster.GetSpec()); err != nil {
+	if err := s.validatePullSecretSecret(ctx, cluster.GetSpec(), inheritsPullSecretSecret); err != nil {
 		return err
 	}
 

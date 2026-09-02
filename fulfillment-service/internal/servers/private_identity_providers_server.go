@@ -314,6 +314,10 @@ func (s *PrivateIdentityProvidersServer) validateClientSecretSecret(
 		s.logger.ErrorContext(ctx, "Failed to resolve client_secret_secret reference", "error", err)
 		return grpcstatus.Errorf(grpccodes.Internal, "failed to resolve client_secret_secret reference")
 	}
+	if resolved.Tenant == auth.SharedTenant {
+		return grpcstatus.Errorf(grpccodes.InvalidArgument,
+			"shared secrets cannot be used as identity provider client_secret_secret references")
+	}
 	// Load the resolved Secret and ensure it carries a non-empty data["value"] entry, as required
 	// by the reconciler that consumes it. Rejecting here surfaces the problem as an INVALID_ARGUMENT
 	// at write time instead of a silent reconcile failure later.

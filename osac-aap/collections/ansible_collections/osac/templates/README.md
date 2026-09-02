@@ -49,8 +49,8 @@ Minimal OpenShift cluster configuration.
 - 2 nodes
 - Resource class: fc430
 
-**Required Parameters:**
-- `pull_secret`: Red Hat pull secret for OpenShift installation
+**Cluster credentials:**
+- `spec_defaults.pull_secret_secret`: Reference to a platform-managed pull Secret
 - `ssh_public_key`: SSH public key for node access
 
 ### VM Templates
@@ -108,6 +108,8 @@ validation, and lifecycle management.
    allowed_resource_classes: []
 
    spec_defaults:
+     pull_secret_secret:
+       name: shared-pull-secret
      release_image: "quay.io/openshift-release-dev/ocp-release:4.17.0-multi"
 
    parameters:
@@ -120,6 +122,11 @@ validation, and lifecycle management.
 
 3. Implement provisioning tasks in `roles/my_cluster_template/tasks/install.yaml`
 4. Implement cleanup tasks in `roles/my_cluster_template/tasks/delete.yaml`
+
+The referenced Secret must be created by a platform administrator in the `shared` tenant before
+the template is published. Pull Secrets must store the registry credentials in the
+`.dockerconfigjson` data key. Tenant users can consume a shared pull Secret through a published
+cluster template, but only platform administrators and controllers can retrieve or mutate its data.
 
 ### Creating a New ComputeInstance Template
 

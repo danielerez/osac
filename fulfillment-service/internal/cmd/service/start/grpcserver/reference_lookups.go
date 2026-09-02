@@ -280,8 +280,14 @@ func registerReferenceLookups(
 	if err != nil {
 		return fmt.Errorf("failed to create Secret DAO for reference lookups: %w", err)
 	}
-	references.RegisterDAOLookup(validator, "osac.private.v1.SecretLocalReference", secretsDAO)
-	references.RegisterDAOLookup(validator, "osac.public.v1.SecretLocalReference", secretsDAO)
+	validator.Register(
+		"osac.private.v1.SecretLocalReference",
+		references.NewScopedDAOLookupFunc(secretsDAO),
+	)
+	validator.Register(
+		"osac.public.v1.SecretLocalReference",
+		references.NewScopedDAOLookupFunc(secretsDAO),
+	)
 
 	return nil
 }

@@ -443,6 +443,10 @@ fulfillment service. Valid values are `default` and `guest`.
    and must be scoped to a specific tenant. Platform-scoped resources (such as roles, users, host
    types, instance types, templates, and catalog items) can be placed in the `shared` tenant.
 
+   Secrets used by shared templates are a special case: their metadata is visible so references can
+   be resolved, but decrypted data and mutations are restricted to platform administrators and
+   controllers.
+
 2. **System Tenant**: The `system` tenant is a special tenant used for objects that are only visible
    to the system itself. Resources assigned to the `system` tenant are not visible to regular users.
    This is used internally for system-level resources. As with the `shared` tenant, tenant-scoped

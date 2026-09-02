@@ -265,6 +265,13 @@ class ClusterNetwork(Base):
     service_cidr: str | None = None
 
 
+class SecretLocalReference(Base):
+    """Reference to a Secret resource by canonical ID or metadata name."""
+
+    id: str | None = None
+    name: str | None = None
+
+
 class ClusterTemplateSpecDefaults(Base):
     """Default values for cluster spec fields.
 
@@ -272,6 +279,7 @@ class ClusterTemplateSpecDefaults(Base):
     """
 
     pull_secret: str | None = None
+    pull_secret_secret: SecretLocalReference | None = None
     ssh_public_key: str | None = None
     release_image: str | None = None
     network: ClusterNetwork | None = None
@@ -345,7 +353,10 @@ class BaseTemplate(Base):
     @pydantic.computed_field
     def metadata(self) -> dict[str, str]:
         name = self.metadata_name if self.metadata_name else self.name.replace("_", "-")
-        return {"name": name}
+        # Template publishing runs as a platform administrator and all template resources are
+        # shared catalog objects. Make the scope explicit so local references (including shared
+        # pull Secrets) are canonicalized within the shared tenant.
+        return {"name": name, "tenant": "shared"}
 
 
 class ClusterTemplate(BaseTemplate):

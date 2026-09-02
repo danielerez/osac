@@ -40,6 +40,17 @@ func (e *errRefNotFound) IsNotFound() bool {
 // NewDAOLookupFunc creates a ReferenceLookupFunc backed by a GenericDAO. It queries the DAO
 // using a CEL filter that matches by id or metadata.name and returns the resolved reference metadata.
 func NewDAOLookupFunc[O dao.Object](d *dao.GenericDAO[O]) ReferenceLookupFunc {
+	return newDAOLookupFunc(d, false)
+}
+
+// NewScopedDAOLookupFunc creates a DAO lookup that additionally constrains references to an
+// explicitly supplied tenant/project. If the caller has no explicit tenant, it retains the
+// visibility-based behavior of NewDAOLookupFunc.
+func NewScopedDAOLookupFunc[O dao.Object](d *dao.GenericDAO[O]) ReferenceLookupFunc {
+	return newDAOLookupFunc(d, true)
+}
+
+func newDAOLookupFunc[O dao.Object](d *dao.GenericDAO[O], scopeExplicitTenant bool) ReferenceLookupFunc {
 	return func(ctx context.Context, tenant, project, id, name string) (*ResolvedRef, error) {
 		var filter string
 		switch {
@@ -54,6 +65,15 @@ func NewDAOLookupFunc[O dao.Object](d *dao.GenericDAO[O]) ReferenceLookupFunc {
 			filter = fmt.Sprintf("this.metadata.name == %s", strconv.Quote(name))
 		default:
 			return nil, &errRefNotFound{identifier: "(empty)"}
+		}
+		// When the caller supplies an explicit scope, keep local references inside it. Requests
+		// without metadata retain the existing visibility-based behavior so generic default-tenant
+		// assignment remains compatible.
+		if scopeExplicitTenant && tenant != "" {
+			filter += fmt.Sprintf(
+				" && this.metadata.tenant == %s && this.metadata.project == %s",
+				strconv.Quote(tenant), strconv.Quote(project),
+			)
 		}
 
 		response, err := d.List().

@@ -627,7 +627,10 @@ var _ = Describe("Private identity providers server", func() {
 	})
 
 	Describe("Client secret secret reference", func() {
-		var server *PrivateIdentityProvidersServer
+		var (
+			server     *PrivateIdentityProvidersServer
+			secretsDao *dao.GenericDAO[*privatev1.Secret]
+		)
 
 		BeforeEach(func() {
 			var err error
@@ -638,7 +641,7 @@ var _ = Describe("Private identity providers server", func() {
 				Build()
 			Expect(err).ToNot(HaveOccurred())
 
-			secretsDao, err := dao.NewGenericDAO[*privatev1.Secret]().
+			secretsDao, err = dao.NewGenericDAO[*privatev1.Secret]().
 				SetLogger(logger).
 				SetTenancyLogic(tenancy).
 				Build()
@@ -712,6 +715,30 @@ var _ = Describe("Private identity providers server", func() {
 			ref := response.GetObject().GetSpec().GetOidc().GetClientSecretSecret()
 			Expect(ref.GetId()).To(Equal("my-secret-id"))
 			Expect(ref.GetName()).To(Equal("my-secret-name"))
+		})
+
+		It("Rejects a shared client_secret_secret reference", func() {
+			_, err := secretsDao.Create().SetObject(privatev1.Secret_builder{
+				Id: "shared-client-secret-id",
+				Metadata: privatev1.Metadata_builder{
+					Name:   "shared-client-secret",
+					Tenant: auth.SharedTenant,
+				}.Build(),
+				Data: map[string][]byte{"value": []byte("shared-value")},
+			}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+
+			_, err = createIdp(privatev1.OidcConfig_builder{
+				AuthorizationUrl: "https://example.com/auth",
+				TokenUrl:         "https://example.com/token",
+				ClientId:         "client-id",
+				Issuer:           "https://example.com",
+				ClientSecretSecret: privatev1.SecretLocalReference_builder{
+					Id: "shared-client-secret-id",
+				}.Build(),
+			}.Build())
+			Expect(grpcstatus.Code(err)).To(Equal(grpccodes.InvalidArgument))
+			Expect(grpcstatus.Convert(err).Message()).To(ContainSubstring("shared secrets cannot be used"))
 		})
 
 		It("Rejects create when client_secret and client_secret_secret are both set", func() {

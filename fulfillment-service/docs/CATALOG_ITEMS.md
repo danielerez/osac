@@ -333,6 +333,27 @@ osac create cluster --catalog-item dev-sandbox \
   --pod-cidr "10.128.0.0/14"
 ```
 
+### Shared pull secrets in cluster templates
+
+Platform administrators can create a Vault-backed pull Secret in the `shared` tenant and reference
+it from a shared cluster template:
+
+```bash
+osac --tenant shared create secret --name shared-pull-secret \
+  --from-file=.dockerconfigjson=pull-secret.json
+```
+
+```yaml
+spec_defaults:
+  pull_secret_secret:
+    name: shared-pull-secret
+```
+
+The reference is resolved to a canonical Secret identifier when the template is published. Clusters
+that don't provide their own pull Secret inherit that reference, and the fulfillment controller
+retrieves its data while provisioning. Tenant users can use the shared credential through the
+template but cannot retrieve or mutate the shared Secret through the Secrets API.
+
 Use `--set` to pass template parameters or override editable spec fields. Each `--set` takes a
 single `KEY=VALUE` pair (split on the first `=`):
 

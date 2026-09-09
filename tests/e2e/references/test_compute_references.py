@@ -88,6 +88,7 @@ def _ci_create_data(
     }
 
 
+@pytest.mark.requires_vmaas
 class TestComputeReferences:
     """OSAC-3100: Compute resource reference tests."""
 

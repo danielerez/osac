@@ -60,6 +60,6 @@ Check component status:
   kubectl -n kubevirt get kubevirt                       # KubeVirt
 
 Check seeded resources:
-  osac get disk-images
-  osac get instance-types
-  osac get catalog-items
+  osac get diskimages
+  osac get instancetypes
+  osac get computeinstancecatalogitems

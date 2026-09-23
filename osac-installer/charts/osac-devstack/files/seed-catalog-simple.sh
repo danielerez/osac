@@ -13,9 +13,15 @@ LOCAL_PORT="${LOCAL_PORT:-8001}"
 
 log() { echo "[+] $*"; }
 
+# The REST gateway encodes gRPC AlreadyExists as status code 6 in its JSON body.
+is_already_exists() {
+  grep -Eq '"code"[[:space:]]*:[[:space:]]*6([[:space:]]*[,}])' "${response_file}"
+}
+
 admin_token=$(kubectl -n "${NS}" create token admin)
 response_file=$(mktemp)
 
+# cleanup removes the response file and stops the port-forward.
 cleanup() {
   rm -f "${response_file}"
   kill "${pf_pid:-}" 2>/dev/null || true
@@ -35,10 +41,11 @@ for _ in $(seq 1 15); do
 done
 
 if ! kill -0 "${pf_pid}" 2>/dev/null; then
-  echo "Catalog seed port-forward to ${INTERNAL_SVC}:${INTERNAL_PORT} failed" >&2
+  echo 'Catalog seed port-forward failed' >&2
   exit 1
 fi
 
+# post creates one catalog resource and accepts only gRPC AlreadyExists conflicts.
 post() {
   local path="$1"
   local description="$2"
@@ -50,22 +57,27 @@ post() {
     -H 'Content-Type: application/json' \
     -X POST "${API}/${path}" -d "${payload}"); then
     echo "Failed to create ${description}: request to ${path} did not complete" >&2
-    cat "${response_file}" >&2 || true
     return 1
   fi
 
   case "${status}" in
     2*) log "${description}: created" ;;
-    409) log "${description}: already exists" ;;
+    409)
+      if is_already_exists; then
+        log "${description}: already exists"
+      else
+        echo "Failed to create ${description}: API returned HTTP ${status}" >&2
+        return 1
+      fi
+      ;;
     *)
       echo "Failed to create ${description}: API returned HTTP ${status}" >&2
-      cat "${response_file}" >&2 || true
       return 1
       ;;
   esac
 }
 
-log "Seeding catalog into '${NS}' via ${INTERNAL_SVC}:${INTERNAL_PORT}..."
+log "Seeding catalog into '${NS}'..."
 
 post disk_images 'disk image fedora' '{
   "metadata": {"name": "fedora", "tenant": "shared"},

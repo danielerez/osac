@@ -460,9 +460,9 @@ csi-render-test: helm-deps ## Verify CSI namespace and ConfigMap rendering modes
 			--set controller.fulfillment.configMap.name=osac-csi-fulfillment-config \
 			--set controller.fulfillment.credentials.secretName=osac-csi-driver-credentials \
 			--set controller.fulfillment.allowStub=false > "$$node_render"; \
-		rg -Fq -- '--fulfillment-endpoint=$(OSAC_FULFILLMENT_ENDPOINT)' "$$node_render"; \
-		rg -Fq -- '--fulfillment-issuer-url=$(OSAC_FULFILLMENT_ISSUER_URL)' "$$node_render"; \
-		rg -Fq -- '--fulfillment-client-id=$(FULFILLMENT_CLIENT_ID)' "$$node_render"; \
+		rg -Fq -- '--fulfillment-endpoint=$$(OSAC_FULFILLMENT_ENDPOINT)' "$$node_render"; \
+		rg -Fq -- '--fulfillment-issuer-url=$$(OSAC_FULFILLMENT_ISSUER_URL)' "$$node_render"; \
+		rg -Fq -- '--fulfillment-client-id=$$(FULFILLMENT_CLIENT_ID)' "$$node_render"; \
 		rg -q 'name: osac-csi-fulfillment-config' "$$node_render"; \
 		rg -q 'secretName: osac-csi-driver-credentials' "$$node_render"; \
 		helm template osac-infra $(INFRA_CHART) \

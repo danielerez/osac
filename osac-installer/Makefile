@@ -407,10 +407,11 @@ csi-render-test: helm-deps ## Verify CSI namespace and ConfigMap rendering modes
 		csi_render="$$(mktemp)"; \
 		full_render="$$(mktemp)"; \
 		custom_render="$$(mktemp)"; \
+		node_render="$$(mktemp)"; \
 		infra_render="$$(mktemp)"; \
 		infra_enabled_render="$$(mktemp)"; \
 		error_render="$$(mktemp)"; \
-		trap 'rm -f "$$caas_render" "$$csi_render" "$$full_render" "$$custom_render" "$$infra_render" "$$infra_enabled_render" "$$error_render"' EXIT; \
+		trap 'rm -f "$$caas_render" "$$csi_render" "$$full_render" "$$custom_render" "$$node_render" "$$infra_render" "$$infra_enabled_render" "$$error_render"' EXIT; \
 		assert_helm_failure() { \
 			expected="$$1"; shift; \
 			if "$$@" >/dev/null 2>"$$error_render"; then \
@@ -453,6 +454,17 @@ csi-render-test: helm-deps ## Verify CSI namespace and ConfigMap rendering modes
 		rg -q '^  CUSTOM_FULFILLMENT_ISSUER_URL:' "$$custom_render"; \
 		rg -q 'key: CUSTOM_FULFILLMENT_ENDPOINT' "$$custom_render"; \
 		rg -q 'key: CUSTOM_FULFILLMENT_ISSUER_URL' "$$custom_render"; \
+		helm template csi-driver ../osac-csi-driver/charts/csi-driver \
+			--show-only templates/node-daemonset.yaml \
+			--set namespace=osac-csi \
+			--set controller.fulfillment.configMap.name=osac-csi-fulfillment-config \
+			--set controller.fulfillment.credentials.secretName=osac-csi-driver-credentials \
+			--set controller.fulfillment.allowStub=false > "$$node_render"; \
+		rg -Fq -- '--fulfillment-endpoint=$(OSAC_FULFILLMENT_ENDPOINT)' "$$node_render"; \
+		rg -Fq -- '--fulfillment-issuer-url=$(OSAC_FULFILLMENT_ISSUER_URL)' "$$node_render"; \
+		rg -Fq -- '--fulfillment-client-id=$(FULFILLMENT_CLIENT_ID)' "$$node_render"; \
+		rg -q 'name: osac-csi-fulfillment-config' "$$node_render"; \
+		rg -q 'secretName: osac-csi-driver-credentials' "$$node_render"; \
 		helm template osac-infra $(INFRA_CHART) \
 			--values values/caas-ci/infra.yaml > "$$infra_render"; \
 		! rg -q 'name: osac-infra-create-csi-creds' "$$infra_render"; \

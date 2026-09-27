@@ -1,3 +1,8 @@
+{{- $fulfillment := .Values.controller.fulfillment -}}
+{{- $endpoint := $fulfillment.endpoint | default "" -}}
+{{- $issuerURL := $fulfillment.issuerUrl | default "" -}}
+{{- $configMapName := $fulfillment.configMap.name | default "" -}}
+{{- $configured := or $configMapName (and $endpoint $issuerURL) -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -25,6 +30,23 @@ spec:
           args:
             - "--csi-endpoint=unix:///csi/osac/csi.sock"
             - "--node-id=$(KUBE_NODE_NAME)"
+            {{- if $configMapName }}
+            - "--fulfillment-endpoint=$(OSAC_FULFILLMENT_ENDPOINT)"
+            - "--fulfillment-issuer-url=$(OSAC_FULFILLMENT_ISSUER_URL)"
+            {{- else if and $endpoint $issuerURL }}
+            - "--fulfillment-endpoint={{ $endpoint }}"
+            - "--fulfillment-issuer-url={{ $issuerURL }}"
+            {{- end }}
+            {{- if $configured }}
+            - "--fulfillment-client-id=$(FULFILLMENT_CLIENT_ID)"
+            - "--fulfillment-client-secret-file=/etc/osac-csi/credentials/client-secret"
+            {{- if $fulfillment.tls.insecureSkipVerify }}
+            - "--grpc-insecure"
+            {{- end }}
+            {{- end }}
+            {{- if $fulfillment.allowStub }}
+            - "--allow-stub"
+            {{- end }}
             {{- if .Values.node.vendorSockets }}
             - "--vendor-sockets={{ .Values.node.vendorSockets }}"
             {{- end }}
@@ -34,12 +56,38 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if $configured }}
+            {{- if $configMapName }}
+            - name: OSAC_FULFILLMENT_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $configMapName }}
+                  key: {{ $fulfillment.configMap.endpointKey }}
+                  optional: false
+            - name: OSAC_FULFILLMENT_ISSUER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ $configMapName }}
+                  key: {{ $fulfillment.configMap.issuerUrlKey }}
+                  optional: false
+            {{- end }}
+            - name: FULFILLMENT_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $fulfillment.credentials.secretName }}
+                  key: {{ $fulfillment.credentials.clientIdKey }}
+            {{- end }}
           volumeMounts:
             - name: osac-socket-dir
               mountPath: /csi/osac
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
               mountPropagation: Bidirectional
+            {{- if $configured }}
+            - name: fulfillment-credentials
+              mountPath: /etc/osac-csi/credentials
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.node.resources | nindent 12 }}
           securityContext:
@@ -76,3 +124,11 @@ spec:
           hostPath:
             path: /var/lib/kubelet/plugins_registry
             type: Directory
+        {{- if $configured }}
+        - name: fulfillment-credentials
+          secret:
+            secretName: {{ $fulfillment.credentials.secretName }}
+            items:
+              - key: {{ $fulfillment.credentials.clientSecretKey }}
+                path: client-secret
+        {{- end }}

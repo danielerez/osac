@@ -24,6 +24,8 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 )
 
+const testClientSecretRequestBody = "client_secret=placeholder"
+
 func TestValidateFulfillmentFlags(t *testing.T) {
 	t.Run("all empty is valid", func(t *testing.T) {
 		if err := validateFulfillmentFlags("", "", false, "", "", "", true); err != nil {
@@ -211,7 +213,7 @@ func TestTokenHTTPClientRejectsSameHostRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/token", strings.NewReader("client_secret=secret"))
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/token", strings.NewReader(testClientSecretRequestBody))
 	if err != nil {
 		t.Fatalf("creating request: %v", err)
 	}

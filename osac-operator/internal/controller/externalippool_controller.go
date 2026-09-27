@@ -334,6 +334,11 @@ func (r *ExternalIPPoolReconciler) handleProvisioning(ctx context.Context, pool 
 // and polls its status. On failure, it either blocks deletion (to prevent orphaned
 // resources) or allows the process to continue, depending on provider policy.
 func (r *ExternalIPPoolReconciler) handleDeprovisioning(ctx context.Context, pool *v1alpha1.ExternalIPPool) (ctrl.Result, error) {
+	if !r.NetworkProvisioningEnabled {
+		ctrllog.FromContext(ctx).Info("network provisioning disabled, skipping deprovisioning")
+		return ctrl.Result{}, nil
+	}
+
 	if r.ProvisioningProvider == nil {
 		ctrllog.FromContext(ctx).Info("no provisioning provider configured, skipping deprovisioning")
 		return ctrl.Result{}, nil

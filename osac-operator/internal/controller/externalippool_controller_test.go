@@ -427,6 +427,33 @@ var _ = Describe("ExternalIPPoolReconciler", func() {
 			Expect(latestJob.JobID).To(Equal("deprovision-job-123"))
 		})
 
+		It("should skip deprovisioning when networking provisioning is disabled", func() {
+			key := types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}
+			reconciler.NetworkProvisioningEnabled = false
+
+			deprovisionCalled := false
+			mockProvider.triggerDeprovisionFunc = func(
+				ctx context.Context, resource client.Object, _ []osacv1alpha1.JobStatus,
+			) (*provisioning.DeprovisionResult, error) {
+				deprovisionCalled = true
+				return nil, nil
+			}
+
+			_, err := reconciler.Reconcile(testCtx, mcreconcile.Request{Request: ctrl.Request{NamespacedName: key}})
+			Expect(err).NotTo(HaveOccurred())
+
+			toDelete := &osacv1alpha1.ExternalIPPool{}
+			Expect(fakeClient.Get(testCtx, key, toDelete)).To(Succeed())
+			now := metav1.Now()
+			toDelete.DeletionTimestamp = &now
+
+			// The fake client rejects an Update after we set DeletionTimestamp in memory,
+			// but handleDelete has already removed the finalizer before that update.
+			_, _ = reconciler.handleDelete(testCtx, toDelete)
+			Expect(deprovisionCalled).To(BeFalse())
+			Expect(toDelete.Finalizers).NotTo(ContainElement(osacExternalIPPoolFinalizer))
+		})
+
 		It("should remove finalizer after successful deprovision", func() {
 			key := types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}
 

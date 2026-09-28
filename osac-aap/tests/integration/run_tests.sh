@@ -58,6 +58,7 @@ WORKFLOWS=(
 ROLE_TESTS=(
   "config_as_code_pod_specs"
   "finalizer"
+  "fulfillment_trust_sync"
   "lease"
   "agentless_net_stub"
 )

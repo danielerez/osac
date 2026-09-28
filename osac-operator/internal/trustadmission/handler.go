@@ -35,6 +35,7 @@ import (
 const (
 	TrustSyncServiceAccount = "osac-fulfillment-trust-sync"
 	TrustClientLabel        = "osac.openshift.io/fulfillment-trust-client"
+	trustClientLabelValue   = "true"
 )
 
 var errInvalidHandlerConfig = errors.New("invalid tenant trust admission configuration")
@@ -71,12 +72,8 @@ func (h *Handler) Handle(_ context.Context, request admission.Request) admission
 	// A validating webhook is cluster scoped. Requests outside this admission
 	// service's tenant namespace must be ignored before checking the caller so
 	// this tenant-specific policy cannot deny unrelated tenant workloads.
-	if request.Namespace != "" && request.Namespace != h.tenantNamespace {
+	if request.Namespace != h.tenantNamespace {
 		return admission.Allowed("")
-	}
-
-	if request.UserInfo.Username != h.trustedServiceAccount {
-		return denied()
 	}
 
 	switch {
@@ -90,12 +87,19 @@ func (h *Handler) Handle(_ context.Context, request admission.Request) admission
 }
 
 func (h *Handler) handleConfigMap(request admission.Request) admission.Response {
-	if request.Operation != admissionv1.Create && request.Operation != admissionv1.Update {
+	candidate := &corev1.ConfigMap{}
+	if err := json.Unmarshal(request.Object.Raw, candidate); err != nil || candidate.Namespace != h.tenantNamespace {
 		return denied()
 	}
-
-	candidate := &corev1.ConfigMap{}
-	if err := json.Unmarshal(request.Object.Raw, candidate); err != nil || candidate.Namespace != h.tenantNamespace || h.store.AuthorizeConfigMap(candidate, h.now()) != nil {
+	if candidate.Name != ConfigMapName && request.Name != ConfigMapName {
+		if request.UserInfo.Username == h.trustedServiceAccount {
+			return denied()
+		}
+		return admission.Allowed("")
+	}
+	if candidate.Name != ConfigMapName || request.UserInfo.Username != h.trustedServiceAccount ||
+		(request.Operation != admissionv1.Create && request.Operation != admissionv1.Update) ||
+		h.store.AuthorizeConfigMap(candidate, h.now()) != nil {
 		return denied()
 	}
 	return admission.Allowed("")
@@ -114,7 +118,24 @@ func (h *Handler) handleDeployment(request admission.Request) admission.Response
 	if err := json.Unmarshal(request.Object.Raw, newDeployment); err != nil {
 		return denied()
 	}
-	if oldDeployment.Namespace != h.tenantNamespace || oldDeployment.Labels[TrustClientLabel] != "true" || !onlyBundleHashChanged(oldDeployment, newDeployment) {
+	if oldDeployment.Namespace != h.tenantNamespace || newDeployment.Namespace != h.tenantNamespace ||
+		oldDeployment.Name != newDeployment.Name {
+		return denied()
+	}
+	if request.UserInfo.Username != h.trustedServiceAccount {
+		// Other authorized actors may upgrade the CSI Deployment or manage
+		// unrelated workloads, but cannot remove its trust label or change its
+		// bundle hash. Those changes are reserved for the trust-sync identity.
+		if oldDeployment.Labels[TrustClientLabel] == trustClientLabelValue && newDeployment.Labels[TrustClientLabel] != trustClientLabelValue {
+			return denied()
+		}
+		if (oldDeployment.Labels[TrustClientLabel] == trustClientLabelValue || newDeployment.Labels[TrustClientLabel] == trustClientLabelValue) &&
+			oldDeployment.Spec.Template.Annotations[BundleHashAnnotation] != newDeployment.Spec.Template.Annotations[BundleHashAnnotation] {
+			return denied()
+		}
+		return admission.Allowed("")
+	}
+	if oldDeployment.Labels[TrustClientLabel] != trustClientLabelValue || !onlyBundleHashChanged(oldDeployment, newDeployment) {
 		return denied()
 	}
 

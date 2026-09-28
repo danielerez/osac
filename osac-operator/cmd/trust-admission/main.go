@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -79,6 +80,13 @@ func run(tenantNamespace, tlsCertFile, tlsKeyFile string) error {
 		writer.WriteHeader(http.StatusOK)
 	})
 
-	server := &http.Server{Addr: ":8443", Handler: mux}
+	server := &http.Server{
+		Addr: ":8443", Handler: mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
+	}
 	return server.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
 }

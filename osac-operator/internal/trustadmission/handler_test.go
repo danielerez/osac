@@ -90,6 +90,15 @@ var _ = Describe("Handler", func() {
 		Entry("for an unsupported operation", syncServiceAccount, admissionv1.Delete, func(*corev1.ConfigMap) {}),
 	)
 
+	It("allows unrelated ConfigMaps from other identities without granting sync broader writes", func() {
+		candidate := configMapFor(record)
+		candidate.Name = "unrelated-settings"
+		Expect(handler.Handle(context.Background(), configMapRequest(admissionv1.Create, candidate,
+			"system:serviceaccount:osac-csi:other")).Allowed).To(BeTrue())
+		Expect(handler.Handle(context.Background(), configMapRequest(admissionv1.Create, candidate,
+			syncServiceAccount)).Allowed).To(BeFalse())
+	})
+
 	It("allows only the expected pod-template hash change on a labelled Deployment", func() {
 		oldDeployment := deploymentWithTrustClientLabel()
 		newDeployment := oldDeployment.DeepCopy()
@@ -120,6 +129,42 @@ var _ = Describe("Handler", func() {
 		}),
 	)
 
+	It("allows unrelated Deployment updates by other identities", func() {
+		oldDeployment := deploymentWithTrustClientLabel()
+		delete(oldDeployment.Labels, trustadmission.TrustClientLabel)
+		newDeployment := oldDeployment.DeepCopy()
+		newDeployment.Spec.Template.Spec.Containers[0].Image = "example.invalid/updated"
+		response := handler.Handle(context.Background(), deploymentRequest(oldDeployment, newDeployment,
+			"system:serviceaccount:osac-csi:other"))
+		Expect(response.Allowed).To(BeTrue())
+	})
+
+	It("allows installer changes to a trust client without changing its trust boundary", func() {
+		oldDeployment := deploymentWithTrustClientLabel()
+		newDeployment := oldDeployment.DeepCopy()
+		newDeployment.Spec.Template.Spec.Containers[0].Image = "example.invalid/updated"
+		response := handler.Handle(context.Background(), deploymentRequest(oldDeployment, newDeployment,
+			"system:serviceaccount:osac-csi:installer"))
+		Expect(response.Allowed).To(BeTrue())
+	})
+
+	DescribeTable("denies trust boundary changes by other identities",
+		func(mutate func(oldDeployment, newDeployment *appsv1.Deployment)) {
+			oldDeployment := deploymentWithTrustClientLabel()
+			newDeployment := oldDeployment.DeepCopy()
+			mutate(oldDeployment, newDeployment)
+			response := handler.Handle(context.Background(), deploymentRequest(oldDeployment, newDeployment,
+				"system:serviceaccount:osac-csi:other"))
+			Expect(response.Allowed).To(BeFalse())
+		},
+		Entry("removing the trust-client label", func(_, newDeployment *appsv1.Deployment) {
+			delete(newDeployment.Labels, trustadmission.TrustClientLabel)
+		}),
+		Entry("altering the bundle hash", func(_, newDeployment *appsv1.Deployment) {
+			newDeployment.Spec.Template.Annotations = map[string]string{trustadmission.BundleHashAnnotation: "unapproved"}
+		}),
+	)
+
 	It("does not disclose request payloads in a denial", func() {
 		const rawKubeconfig = "apiVersion: v1\nclusters:\n- name: confidential"
 		candidate := configMapFor(record)
@@ -143,11 +188,17 @@ var _ = Describe("Handler", func() {
 })
 
 func configMapRequest(operation admissionv1.Operation, configMap *corev1.ConfigMap, username string) admission.Request {
-	return admissionRequest(operation, "", "v1", "configmaps", "ConfigMap", configMap, nil, username)
+	request := admissionRequest(operation, "", "v1", "configmaps", "ConfigMap", configMap, nil, username)
+	request.Namespace = configMap.Namespace
+	request.Name = configMap.Name
+	return request
 }
 
 func deploymentRequest(oldDeployment, newDeployment *appsv1.Deployment, username string) admission.Request {
-	return admissionRequest(admissionv1.Update, "apps", "v1", "deployments", "Deployment", newDeployment, oldDeployment, username)
+	request := admissionRequest(admissionv1.Update, "apps", "v1", "deployments", "Deployment", newDeployment, oldDeployment, username)
+	request.Namespace = newDeployment.Namespace
+	request.Name = newDeployment.Name
+	return request
 }
 
 func admissionRequest(operation admissionv1.Operation, group, version, resource, kind string, object, oldObject any, username string) admission.Request {

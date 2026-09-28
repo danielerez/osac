@@ -244,6 +244,7 @@ var clusterOrderUnsurfacedConditions = map[string]struct{}{
 	ckv1alpha1.ConditionNamespaceCreated:                        {},
 	ckv1alpha1.ConditionDeleting:                                {},
 	string(ckv1alpha1.ClusterOrderConditionAddOnOperatorsReady): {},
+	string(ckv1alpha1.ClusterOrderConditionFulfillmentTrustReady): {},
 }
 
 func syncClusterOrderConditions(ctx context.Context, clusterOrder *ckv1alpha1.ClusterOrder, remote *privatev1.Cluster) {

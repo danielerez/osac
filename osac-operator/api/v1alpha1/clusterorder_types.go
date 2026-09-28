@@ -171,6 +171,8 @@ const (
 	// operators have been successfully installed on the provisioned cluster.
 	// Owned by the AddOnOperatorReconciler. Does not gate Phase=Ready.
 	ClusterOrderConditionAddOnOperatorsReady ClusterOrderConditionType = "AddOnOperatorsReady"
+	// ClusterOrderConditionFulfillmentTrustReady indicates whether fulfillment trust is synchronized.
+	ClusterOrderConditionFulfillmentTrustReady ClusterOrderConditionType = "FulfillmentTrustReady"
 )
 
 // ClusterOrderClusterReferenceType contains a reference to the namespace created by this ClusterOrder
@@ -278,6 +280,13 @@ type ClusterOrderStatus struct {
 	// One entry is recorded for each operator attempt.
 	// +kubebuilder:validation:Optional
 	AddOnOperatorJobs []AddOnOperatorJobStatus `json:"addOnOperatorJobs,omitempty"`
+	// FulfillmentTrustBundleHash is the hash of the last observed fulfillment trust bundle.
+	// +kubebuilder:validation:Optional
+	FulfillmentTrustBundleHash string `json:"fulfillmentTrustBundleHash,omitempty"`
+
+	// FulfillmentTrustJobs holds the bounded history of fulfillment trust synchronization jobs.
+	// +kubebuilder:validation:Optional
+	FulfillmentTrustJobs []JobStatus `json:"fulfillmentTrustJobs,omitempty"`
 
 	// DesiredConfigVersion is a hash of the current spec, used to detect spec changes
 	// that require re-provisioning.

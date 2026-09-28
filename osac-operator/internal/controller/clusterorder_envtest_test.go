@@ -120,6 +120,34 @@ var _ = Describe("ClusterOrder Integration Tests", func() {
 		Expect(k8sClient.Create(ctx, instance)).NotTo(Succeed())
 	})
 
+	It("should round-trip fulfillment trust observed status through the ClusterOrder CRD", func() {
+		const name = "cluster-order-fulfillment-trust-status"
+		instance := newTestClusterOrder(name)
+		Expect(k8sClient.Create(ctx, instance)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, instance) })
+
+		instance.Status.FulfillmentTrustBundleHash = "sha256:bundle"
+		instance.Status.FulfillmentTrustJobs = []osacv1alpha1.JobStatus{{
+			JobID:     "trust-job-1",
+			Type:      osacv1alpha1.JobTypeProvision,
+			Timestamp: metav1.Now(),
+			State:     osacv1alpha1.JobStateSucceeded,
+		}}
+		instance.SetStatusCondition(
+			string(osacv1alpha1.ClusterOrderConditionFulfillmentTrustReady),
+			metav1.ConditionTrue,
+			"trust bundle synchronized",
+			"TrustBundleSynchronized",
+		)
+		Expect(k8sClient.Status().Update(ctx, instance)).To(Succeed())
+
+		stored := getClusterOrder(name)
+		Expect(stored.Status.FulfillmentTrustBundleHash).To(Equal("sha256:bundle"))
+		Expect(stored.Status.FulfillmentTrustJobs).To(HaveLen(1))
+		Expect(stored.Status.FulfillmentTrustJobs[0].JobID).To(Equal("trust-job-1"))
+		Expect(stored.IsStatusConditionTrue(string(osacv1alpha1.ClusterOrderConditionFulfillmentTrustReady))).To(BeTrue())
+	})
+
 	countProvisionJobs := func(instance *osacv1alpha1.ClusterOrder) int {
 		count := 0
 		for _, j := range instance.Status.ProvisioningJobs {

@@ -22,6 +22,22 @@
             }
           }
         },
+        "fulfillmentTrust": {
+          "type": "object",
+          "description": "Cross-cluster fulfillment trust configuration shared with tenant-cluster workloads",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable fulfillment trust synchronization",
+              "default": false
+            },
+            "tenantNamespace": {
+              "type": "string",
+              "description": "Namespace containing fulfillment trust resources in tenant clusters",
+              "default": "osac-csi"
+            }
+          }
+        },
         "services": {
           "type": "object",
           "description": "Service tier enablement flags. Controls which tiers are active across all OSAC components.",

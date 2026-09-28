@@ -164,6 +164,9 @@ const (
 	// and CSI drivers are installed on the CaaS cluster for this tenant.
 	// Owned by the OSAC Storage Controller. Does not gate Phase=Ready.
 	ClusterOrderConditionClusterStorageReady ClusterOrderConditionType = "ClusterStorageReady"
+
+	// ClusterOrderConditionFulfillmentTrustReady indicates whether fulfillment trust is synchronized.
+	ClusterOrderConditionFulfillmentTrustReady ClusterOrderConditionType = "FulfillmentTrustReady"
 )
 
 // ClusterOrderClusterReferenceType contains a reference to the namespace created by this ClusterOrder
@@ -257,6 +260,14 @@ type ClusterOrderStatus struct {
 	// ClusterStorageJobs holds the history of cluster storage provisioning/deprovisioning jobs
 	// +kubebuilder:validation:Optional
 	ClusterStorageJobs []JobStatus `json:"clusterStorageJobs,omitempty"`
+
+	// FulfillmentTrustBundleHash is the hash of the last observed fulfillment trust bundle.
+	// +kubebuilder:validation:Optional
+	FulfillmentTrustBundleHash string `json:"fulfillmentTrustBundleHash,omitempty"`
+
+	// FulfillmentTrustJobs holds the bounded history of fulfillment trust synchronization jobs.
+	// +kubebuilder:validation:Optional
+	FulfillmentTrustJobs []JobStatus `json:"fulfillmentTrustJobs,omitempty"`
 
 	// DesiredConfigVersion is a hash of the current spec, used to detect spec changes
 	// that require re-provisioning.

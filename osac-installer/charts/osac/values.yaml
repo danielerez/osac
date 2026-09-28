@@ -19,6 +19,9 @@ global:
   # Leave empty to derive <service.externalHostname>:443 for OpenShift.
   fulfillment:
     endpoint: ""
+  fulfillmentTrust:
+    enabled: false
+    tenantNamespace: osac-csi
   # --- Service Enablement ---
   # Controls which service tiers are active across all OSAC components.
   # When all are true (the default), OSAC operates as a full-stack cloud.

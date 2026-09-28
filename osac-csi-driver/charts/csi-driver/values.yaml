@@ -2,6 +2,11 @@
 # explicitly for its shared hub deployment.
 namespace: ""
 
+global:
+  fulfillmentTrust:
+    enabled: false
+    tenantNamespace: osac-csi
+
 driverName: csi.osac.openshift.io
 
 image:

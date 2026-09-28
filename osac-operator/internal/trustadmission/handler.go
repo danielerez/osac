@@ -35,6 +35,8 @@ import (
 const (
 	TrustSyncServiceAccount = "osac-fulfillment-trust-sync"
 	TrustClientLabel        = "osac.openshift.io/fulfillment-trust-client"
+	trustClientLabelValue   = "true"
+	namespaceControllerUser = "system:serviceaccount:kube-system:namespace-controller"
 )
 
 var errInvalidHandlerConfig = errors.New("invalid tenant trust admission configuration")
@@ -67,34 +69,52 @@ func NewHandler(store Store, config Config) (*Handler, error) {
 	}, nil
 }
 
-func (h *Handler) Handle(_ context.Context, request admission.Request) admission.Response {
-	if request.UserInfo.Username != h.trustedServiceAccount {
-		return denied()
+func (h *Handler) Handle(ctx context.Context, request admission.Request) admission.Response {
+	// A validating webhook is cluster scoped. Requests outside this admission
+	// service's tenant namespace must be ignored before checking the caller so
+	// this tenant-specific policy cannot deny unrelated tenant workloads.
+	if request.Namespace != h.tenantNamespace {
+		return admission.Allowed("")
 	}
 
 	switch {
 	case isConfigMapRequest(request):
-		return h.handleConfigMap(request)
+		return h.handleConfigMap(ctx, request)
 	case isDeploymentRequest(request):
-		return h.handleDeployment(request)
+		return h.handleDeployment(ctx, request)
 	default:
 		return denied()
 	}
 }
 
-func (h *Handler) handleConfigMap(request admission.Request) admission.Response {
-	if request.Operation != admissionv1.Create && request.Operation != admissionv1.Update {
+func (h *Handler) handleConfigMap(ctx context.Context, request admission.Request) admission.Response {
+	candidate := &corev1.ConfigMap{}
+	object := request.Object.Raw
+	if request.Operation == admissionv1.Delete {
+		object = request.OldObject.Raw
+	}
+	if err := json.Unmarshal(object, candidate); err != nil || candidate.Namespace != h.tenantNamespace {
 		return denied()
 	}
-
-	candidate := &corev1.ConfigMap{}
-	if err := json.Unmarshal(request.Object.Raw, candidate); err != nil || candidate.Namespace != h.tenantNamespace || h.store.AuthorizeConfigMap(candidate, h.now()) != nil {
+	if candidate.Name != ConfigMapName && request.Name != ConfigMapName {
+		if request.UserInfo.Username == h.trustedServiceAccount {
+			return denied()
+		}
+		return admission.Allowed("")
+	}
+	if request.Operation == admissionv1.Delete && request.UserInfo.Username == namespaceControllerUser &&
+		candidate.Name == ConfigMapName && request.Name == ConfigMapName {
+		return admission.Allowed("")
+	}
+	if candidate.Name != ConfigMapName || request.UserInfo.Username != h.trustedServiceAccount ||
+		(request.Operation != admissionv1.Create && request.Operation != admissionv1.Update) ||
+		h.store.AuthorizeConfigMap(ctx, candidate, h.now()) != nil {
 		return denied()
 	}
 	return admission.Allowed("")
 }
 
-func (h *Handler) handleDeployment(request admission.Request) admission.Response {
+func (h *Handler) handleDeployment(ctx context.Context, request admission.Request) admission.Response {
 	if request.Operation != admissionv1.Update {
 		return denied()
 	}
@@ -107,12 +127,29 @@ func (h *Handler) handleDeployment(request admission.Request) admission.Response
 	if err := json.Unmarshal(request.Object.Raw, newDeployment); err != nil {
 		return denied()
 	}
-	if oldDeployment.Namespace != h.tenantNamespace || oldDeployment.Labels[TrustClientLabel] != "true" || !onlyBundleHashChanged(oldDeployment, newDeployment) {
+	if oldDeployment.Namespace != h.tenantNamespace || newDeployment.Namespace != h.tenantNamespace ||
+		oldDeployment.Name != newDeployment.Name {
+		return denied()
+	}
+	if request.UserInfo.Username != h.trustedServiceAccount {
+		// Other authorized actors may upgrade the CSI Deployment or manage
+		// unrelated workloads, but cannot remove its trust label or change its
+		// bundle hash. Those changes are reserved for the trust-sync identity.
+		if oldDeployment.Labels[TrustClientLabel] == trustClientLabelValue && newDeployment.Labels[TrustClientLabel] != trustClientLabelValue {
+			return denied()
+		}
+		if (oldDeployment.Labels[TrustClientLabel] == trustClientLabelValue || newDeployment.Labels[TrustClientLabel] == trustClientLabelValue) &&
+			oldDeployment.Spec.Template.Annotations[BundleHashAnnotation] != newDeployment.Spec.Template.Annotations[BundleHashAnnotation] {
+			return denied()
+		}
+		return admission.Allowed("")
+	}
+	if oldDeployment.Labels[TrustClientLabel] != trustClientLabelValue || !onlyBundleHashChanged(oldDeployment, newDeployment) {
 		return denied()
 	}
 
 	bundleHash := newDeployment.Spec.Template.Annotations[BundleHashAnnotation]
-	if h.store.AuthorizeDeployment(newDeployment.Namespace, bundleHash, h.now()) != nil {
+	if h.store.AuthorizeDeployment(ctx, newDeployment.Namespace, bundleHash, h.now()) != nil {
 		return denied()
 	}
 	return admission.Allowed("")

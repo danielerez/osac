@@ -4,6 +4,7 @@
 {{- $configMapName := $fulfillment.configMap.name | default "" -}}
 {{- $secretName := $fulfillment.credentials.secretName | default "" -}}
 {{- $trustEnabled := .Values.global.fulfillmentTrust.enabled | default false -}}
+{{- $trustNamespace := .Values.global.fulfillmentTrust.tenantNamespace | default "" -}}
 {{- $caBundleConfigMap := $fulfillment.tls.caBundle.configMap | default "" -}}
 {{- $caBundleKey := $fulfillment.tls.caBundle.key | default "" -}}
 {{- if and $configMapName (or $endpoint $issuerURL) -}}
@@ -30,6 +31,9 @@
 {{- end -}}
 {{- if and $trustEnabled (not (and $caBundleConfigMap $caBundleKey)) -}}
 {{- fail "controller.fulfillment.tls.caBundle.configMap and key are required when global.fulfillmentTrust.enabled is true" -}}
+{{- end -}}
+{{- if and $trustEnabled (ne $trustNamespace (include "csi-driver.namespace" .)) -}}
+{{- fail "global.fulfillmentTrust.tenantNamespace must equal the CSI driver namespace when fulfillment trust is enabled" -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment

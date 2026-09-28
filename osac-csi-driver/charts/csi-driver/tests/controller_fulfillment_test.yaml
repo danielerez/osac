@@ -28,6 +28,7 @@ tests:
 
   - it: should mount the tenant CA and enable the trust-client label only when fulfillment trust is enabled
     set:
+      namespace: osac-csi
       global.fulfillmentTrust.enabled: true
       controller.fulfillment.endpoint: "fulfillment-api.osac.svc:8000"
       controller.fulfillment.issuerUrl: "https://keycloak.example.com/realms/myrealm"

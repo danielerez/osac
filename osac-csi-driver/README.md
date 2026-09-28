@@ -44,6 +44,7 @@ make image-push   # Push container image
 | `--fulfillment-client-id` | (empty) | OAuth2 client ID for fulfillment-service authentication |
 | `--fulfillment-client-secret-file` | (empty) | Path to file containing the OAuth2 client secret |
 | `--fulfillment-issuer-url` | (empty) | Keycloak issuer URL for `client_credentials` token exchange |
+| `--fulfillment-ca-file` | (empty) | PEM CA bundle for verified fulfillment-service and OAuth TLS connections |
 | `--grpc-insecure` | `false` | Skip TLS server certificate verification |
 | `--vendor-sockets` | (empty) | Comma-separated `backend=socketpath` pairs |
 

@@ -74,6 +74,26 @@ tests:
           value: osac-fulfillment-ca
         documentIndex: 7
       - equal:
+          path: rules[3].resources[0]
+          value: replicasets
+        documentIndex: 7
+      - equal:
+          path: rules[3].verbs
+          value: [get, list]
+        documentIndex: 7
+      - equal:
+          path: rules[4].resources[0]
+          value: pods
+        documentIndex: 7
+      - equal:
+          path: rules[2].resources[0]
+          value: replicasets
+        documentIndex: 8
+      - equal:
+          path: rules[3].resources[0]
+          value: pods
+        documentIndex: 8
+      - equal:
           path: rules[0].verbs
           value: [get, list, watch]
         documentIndex: 8

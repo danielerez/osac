@@ -130,6 +130,10 @@ spec:
                 fieldPath: metadata.namespace
           - name: OSAC_ENABLE_CLUSTER_CONTROLLER
             value: {{ include "osac-operator.controllerEnabled" (list . "clusterOrder" "caas") | quote }}
+          - name: OSAC_ENABLE_FULFILLMENT_TRUST_RECONCILER
+            value: {{ .Values.global.fulfillmentTrust.enabled | default false | quote }}
+          - name: OSAC_FULFILLMENT_TRUST_TENANT_NAMESPACE
+            value: {{ .Values.global.fulfillmentTrust.tenantNamespace | quote }}
           - name: OSAC_ENABLE_COMPUTE_INSTANCE_CONTROLLER
             value: {{ include "osac-operator.controllerEnabled" (list . "computeInstance" "vmaas") | quote }}
           - name: OSAC_ENABLE_TENANT_CONTROLLER

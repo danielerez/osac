@@ -68,6 +68,13 @@ func NewHandler(store Store, config Config) (*Handler, error) {
 }
 
 func (h *Handler) Handle(_ context.Context, request admission.Request) admission.Response {
+	// A validating webhook is cluster scoped. Requests outside this admission
+	// service's tenant namespace must be ignored before checking the caller so
+	// this tenant-specific policy cannot deny unrelated tenant workloads.
+	if request.Namespace != "" && request.Namespace != h.tenantNamespace {
+		return admission.Allowed("")
+	}
+
 	if request.UserInfo.Username != h.trustedServiceAccount {
 		return denied()
 	}

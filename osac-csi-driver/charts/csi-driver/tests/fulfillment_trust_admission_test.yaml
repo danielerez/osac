@@ -1,0 +1,78 @@
+suite: fulfillment trust admission bootstrap
+templates:
+  - templates/fulfillment-trust-admission.yaml
+tests:
+  - it: should render nothing while fulfillment trust is disabled
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render isolated trust identities and bind sync only after readiness
+    set:
+      global.fulfillmentTrust.enabled: true
+      global.fulfillmentTrust.tenantNamespace: osac-csi
+    asserts:
+      - hasDocuments:
+          count: 19
+      - isKind:
+          of: ServiceAccount
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: osac-fulfillment-trust-admission
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: osac-fulfillment-trust-sync
+        documentIndex: 2
+      - equal:
+          path: metadata.name
+          value: osac-fulfillment-trust-observer
+        documentIndex: 3
+      - equal:
+          path: metadata.name
+          value: osac-fulfillment-trust-publisher
+        documentIndex: 4
+      - equal:
+          path: rules[0].resources[0]
+          value: secrets
+        documentIndex: 8
+      - equal:
+          path: rules[0].resourceNames[0]
+          value: osac-fulfillment-trust-expected-bundles
+        documentIndex: 8
+      - equal:
+          path: rules[0].verbs
+          value: [create]
+        documentIndex: 9
+      - equal:
+          path: rules[1].resourceNames[0]
+          value: osac-fulfillment-ca
+        documentIndex: 9
+      - equal:
+          path: rules[0].verbs
+          value: [get, list, watch]
+        documentIndex: 10
+      - notExists:
+          path: rules[0].verbs[3]
+        documentIndex: 10
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: post-install,post-upgrade
+        documentIndex: 17
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "(?s)rollout status deployment.*validatingwebhookconfiguration.*expected-bundles.*create rolebinding"
+        documentIndex: 17
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-delete
+        documentIndex: 18
+
+  - it: should reject a trust namespace that differs from the CSI namespace
+    set:
+      global.fulfillmentTrust.enabled: true
+      global.fulfillmentTrust.tenantNamespace: another-namespace
+    asserts:
+      - failedTemplate:
+          errorMessage: global.fulfillmentTrust.tenantNamespace must equal the CSI driver namespace when fulfillment trust is enabled

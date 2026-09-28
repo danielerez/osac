@@ -6,6 +6,16 @@ global:
   fulfillmentTrust:
     enabled: false
     tenantNamespace: osac-csi
+    admission:
+      image:
+        repository: ghcr.io/osac-project/osac-operator
+        tag: latest
+        pullPolicy: Always
+      # The tenant admission service uses the OpenShift service CA to issue
+      # and inject the serving certificate. This keeps private key material
+      # in a Kubernetes Secret instead of Helm values.
+      tlsSecretName: osac-fulfillment-trust-admission-tls
+      bootstrapImage: registry.k8s.io/kubectl:v1.32.3
 
 driverName: csi.osac.openshift.io
 

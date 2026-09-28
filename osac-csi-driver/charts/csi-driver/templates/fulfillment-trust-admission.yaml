@@ -1,0 +1,378 @@
+{{- $trust := .Values.global.fulfillmentTrust -}}
+{{- if $trust.enabled }}
+{{- $namespace := $trust.tenantNamespace -}}
+{{- if ne $namespace (include "csi-driver.namespace" .) }}
+{{- fail "global.fulfillmentTrust.tenantNamespace must equal the CSI driver namespace when fulfillment trust is enabled" }}
+{{- end }}
+{{- $fullname := include "csi-driver.fullname" . }}
+{{- $tlsSecretName := $trust.admission.tlsSecretName | default "osac-fulfillment-trust-admission-tls" }}
+{{- $bootstrapImage := $trust.admission.bootstrapImage | default "registry.k8s.io/kubectl:v1.32.3" }}
+{{- $admissionServiceAccount := "osac-fulfillment-trust-admission" }}
+{{- $bootstrapServiceAccount := "osac-fulfillment-trust-bootstrap" }}
+{{- $syncServiceAccount := "osac-fulfillment-trust-sync" }}
+{{- $observerServiceAccount := "osac-fulfillment-trust-observer" }}
+{{- $publisherServiceAccount := "osac-fulfillment-trust-publisher" }}
+{{- $storeName := "osac-fulfillment-trust-expected-bundles" }}
+{{- $webhookName := printf "%s-fulfillment-trust" $fullname | trunc 63 | trimSuffix "-" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $admissionServiceAccount }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-admission
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $bootstrapServiceAccount }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-bootstrap
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $syncServiceAccount }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-sync
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $observerServiceAccount }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-observer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $publisherServiceAccount }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-publisher
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $storeName }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-admission
+type: Opaque
+stringData:
+  records.json: "[]"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-admission
+  namespace: {{ $namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $storeName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-admission
+  namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-fulfillment-trust-admission
+subjects:
+  - kind: ServiceAccount
+    name: {{ $admissionServiceAccount }}
+    namespace: {{ $namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-sync
+  namespace: {{ $namespace }}
+rules:
+  # Kubernetes RBAC cannot scope ConfigMap create by resource name. The
+  # admission service enforces the object and field boundary at mutation time.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["osac-fulfillment-ca"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-observer
+  namespace: {{ $namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["osac-fulfillment-ca"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-bootstrap
+  namespace: {{ $namespace }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ printf "%s-fulfillment-trust-admission" $fullname | quote }}]
+    verbs: ["get", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $storeName | quote }}, {{ $tlsSecretName | quote }}]
+    verbs: ["get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    resourceNames: [{{ printf "%s-fulfillment-trust-sync" $fullname | quote }}]
+    verbs: ["bind"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create", "get"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    resourceNames: [{{ printf "%s-fulfillment-trust-sync" $fullname | quote }}]
+    verbs: ["delete", "get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-bootstrap
+  namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-fulfillment-trust-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ $bootstrapServiceAccount }}
+    namespace: {{ $namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-bootstrap
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: [{{ $webhookName | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-bootstrap
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-fulfillment-trust-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ $bootstrapServiceAccount }}
+    namespace: {{ $namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-admission
+  namespace: {{ $namespace }}
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: {{ $tlsSecretName | quote }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-admission
+spec:
+  selector:
+    {{- include "csi-driver.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-admission
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-admission
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fulfillment-trust-admission
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "csi-driver.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: fulfillment-trust-admission
+  template:
+    metadata:
+      labels:
+        {{- include "csi-driver.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: fulfillment-trust-admission
+    spec:
+      serviceAccountName: {{ $admissionServiceAccount }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: trust-admission
+          image: "{{ $trust.admission.image.repository }}:{{ $trust.admission.image.tag }}"
+          imagePullPolicy: {{ $trust.admission.image.pullPolicy }}
+          command: ["/usr/local/bin/trust-admission"]
+          args:
+            - "--tenant-namespace={{ $namespace }}"
+            - "--tls-cert-file=/var/run/osac-trust-admission/tls/tls.crt"
+            - "--tls-key-file=/var/run/osac-trust-admission/tls/tls.key"
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /readyz
+              port: https
+          livenessProbe:
+            httpGet:
+              scheme: HTTPS
+              path: /healthz
+              port: https
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tls
+              mountPath: /var/run/osac-trust-admission/tls
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ $tlsSecretName }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ $webhookName }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+  labels:
+    {{- include "csi-driver.labels" . | nindent 4 }}
+webhooks:
+  - name: fulfillment-trust-configmaps.osac.openshift.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    clientConfig:
+      service:
+        namespace: {{ $namespace }}
+        name: {{ $fullname }}-fulfillment-trust-admission
+        path: /validate
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["configmaps"]
+        scope: Namespaced
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["deployments"]
+        scope: Namespaced
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-bootstrap
+  namespace: {{ $namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $bootstrapServiceAccount }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bind-trust-sync
+          image: {{ $bootstrapImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |-
+              kubectl rollout status deployment/{{ $fullname }}-fulfillment-trust-admission --timeout=300s
+              kubectl get validatingwebhookconfiguration/{{ $webhookName }}
+              kubectl get secret/{{ $storeName }} -o jsonpath='{.data.records\.json}' | grep -qx 'W10='
+              kubectl get secret/{{ $tlsSecretName }} -o jsonpath='{.data.tls\.crt}' | grep -q .
+              kubectl create rolebinding {{ $fullname }}-fulfillment-trust-sync \
+                --role={{ $fullname }}-fulfillment-trust-sync \
+                --serviceaccount={{ $namespace }}:{{ $syncServiceAccount }} \
+                --dry-run=client -o yaml | kubectl apply -f -
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-cleanup
+  namespace: {{ $namespace }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $bootstrapServiceAccount }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: remove-trust-sync-binding
+          image: {{ $bootstrapImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - kubectl delete rolebinding {{ $fullname }}-fulfillment-trust-sync --ignore-not-found
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+{{- end }}

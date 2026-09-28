@@ -130,6 +130,16 @@ var _ = Describe("Handler", func() {
 		Expect(response.Result.Message).NotTo(ContainSubstring(rawKubeconfig))
 		Expect(response.Result.Message).NotTo(ContainSubstring("confidential"))
 	})
+
+	It("ignores requests outside the configured tenant namespace", func() {
+		candidate := configMapFor(record)
+		candidate.Namespace = "another-tenant"
+
+		request := configMapRequest(admissionv1.Create, candidate, "system:serviceaccount:another-tenant:unrelated")
+		request.Namespace = candidate.Namespace
+		response := handler.Handle(context.Background(), request)
+		Expect(response.Allowed).To(BeTrue())
+	})
 })
 
 func configMapRequest(operation admissionv1.Operation, configMap *corev1.ConfigMap, username string) admission.Request {

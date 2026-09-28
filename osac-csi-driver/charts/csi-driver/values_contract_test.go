@@ -39,6 +39,14 @@ func TestFulfillmentTrustDefaults(t *testing.T) {
 	if tenantNamespace["type"] != "string" || tenantNamespace["default"] != "osac-csi" {
 		t.Error("installer schema does not schema the default fulfillment trust tenant namespace")
 	}
+
+	csiValues := readValues(t, filepath.Join(repoRoot, "osac-csi-driver/charts/csi-driver/values.yaml"))
+	csiTrust := valueObject(t, valueObject(t, csiValues, "global"), "fulfillmentTrust")
+	admission := valueObject(t, csiTrust, "admission")
+	resources := valueObject(t, admission, "resources")
+	if len(valueObject(t, resources, "requests")) == 0 || len(valueObject(t, resources, "limits")) == 0 {
+		t.Error("tenant trust admission resources must define requests and limits")
+	}
 }
 
 func readValues(t *testing.T, path string) map[string]any {

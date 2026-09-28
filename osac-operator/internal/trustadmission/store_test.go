@@ -17,6 +17,7 @@ limitations under the License.
 package trustadmission_test
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -57,38 +58,38 @@ var _ = Describe("MemoryStore", func() {
 	})
 
 	It("authorizes the exact active ConfigMap bundle", func() {
-		Expect(store.Publish(record)).To(Succeed())
+		Expect(store.Publish(context.Background(), record)).To(Succeed())
 
-		Expect(store.AuthorizeConfigMap(configMapFor(record), now)).To(Succeed())
+		Expect(store.AuthorizeConfigMap(context.Background(), configMapFor(record), now)).To(Succeed())
 	})
 
 	It("allows harmless labels but rejects controller ownership metadata", func() {
-		Expect(store.Publish(record)).To(Succeed())
+		Expect(store.Publish(context.Background(), record)).To(Succeed())
 		candidate := configMapFor(record)
 		candidate.Labels = map[string]string{"app.kubernetes.io/managed-by": "helm"}
-		Expect(store.AuthorizeConfigMap(candidate, now)).To(Succeed())
+		Expect(store.AuthorizeConfigMap(context.Background(), candidate, now)).To(Succeed())
 
 		candidate.OwnerReferences = []metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "owner", UID: "owner-uid"}}
-		Expect(store.AuthorizeConfigMap(candidate, now)).NotTo(Succeed())
+		Expect(store.AuthorizeConfigMap(context.Background(), candidate, now)).NotTo(Succeed())
 		candidate.OwnerReferences = nil
 		candidate.Finalizers = []string{"example.com/finalizer"}
-		Expect(store.AuthorizeConfigMap(candidate, now)).NotTo(Succeed())
+		Expect(store.AuthorizeConfigMap(context.Background(), candidate, now)).NotTo(Succeed())
 	})
 
 	It("rejects a record whose payload is not a certificate bundle", func() {
 		record.BundlePEM = []byte("apiVersion: v1\nkind: Config\n")
 		record.Key.BundleSHA256 = bundleHash(record.BundlePEM)
 
-		Expect(store.Publish(record)).NotTo(Succeed())
+		Expect(store.Publish(context.Background(), record)).NotTo(Succeed())
 	})
 
 	DescribeTable("denies ConfigMaps that differ from the expected record",
 		func(mutate func(*corev1.ConfigMap)) {
-			Expect(store.Publish(record)).To(Succeed())
+			Expect(store.Publish(context.Background(), record)).To(Succeed())
 			candidate := configMapFor(record)
 			mutate(candidate)
 
-			Expect(store.AuthorizeConfigMap(candidate, now)).NotTo(Succeed())
+			Expect(store.AuthorizeConfigMap(context.Background(), candidate, now)).NotTo(Succeed())
 		},
 		Entry("with altered bundle bytes", func(candidate *corev1.ConfigMap) {
 			candidate.Data[trustadmission.BundleDataKey] = "different bundle"
@@ -109,32 +110,32 @@ var _ = Describe("MemoryStore", func() {
 
 	It("denies expired and revoked records", func() {
 		record.ExpiresAt = now.Add(-time.Second)
-		Expect(store.Publish(record)).To(Succeed())
-		Expect(store.AuthorizeConfigMap(configMapFor(record), now)).NotTo(Succeed())
+		Expect(store.Publish(context.Background(), record)).To(Succeed())
+		Expect(store.AuthorizeConfigMap(context.Background(), configMapFor(record), now)).NotTo(Succeed())
 
 		record.ExpiresAt = now.Add(time.Hour)
-		Expect(store.Publish(record)).To(Succeed())
-		Expect(store.Revoke(record.Key)).To(Succeed())
-		Expect(store.AuthorizeConfigMap(configMapFor(record), now)).NotTo(Succeed())
+		Expect(store.Publish(context.Background(), record)).To(Succeed())
+		Expect(store.Revoke(context.Background(), record.Key)).To(Succeed())
+		Expect(store.AuthorizeConfigMap(context.Background(), configMapFor(record), now)).NotTo(Succeed())
 	})
 
 	It("authorizes a Deployment hash only for one active tenant record", func() {
-		Expect(store.Publish(record)).To(Succeed())
-		Expect(store.AuthorizeDeployment(record.Key.TenantNamespace, record.Key.BundleSHA256, now)).To(Succeed())
+		Expect(store.Publish(context.Background(), record)).To(Succeed())
+		Expect(store.AuthorizeDeployment(context.Background(), record.Key.TenantNamespace, record.Key.BundleSHA256, now)).To(Succeed())
 
 		second := record
 		second.Key.ClusterOrderUID = "another-cluster-order"
 		second.OwnerReference = second.Key.ClusterOrderUID
-		Expect(store.Publish(second)).To(Succeed())
-		Expect(store.AuthorizeDeployment(record.Key.TenantNamespace, record.Key.BundleSHA256, now)).NotTo(Succeed())
+		Expect(store.Publish(context.Background(), second)).To(Succeed())
+		Expect(store.AuthorizeDeployment(context.Background(), record.Key.TenantNamespace, record.Key.BundleSHA256, now)).NotTo(Succeed())
 	})
 
 	It("denies authorization after revocation completes", func() {
-		Expect(store.Publish(record)).To(Succeed())
-		Expect(store.Revoke(record.Key)).To(Succeed())
+		Expect(store.Publish(context.Background(), record)).To(Succeed())
+		Expect(store.Revoke(context.Background(), record.Key)).To(Succeed())
 
-		Expect(store.AuthorizeConfigMap(configMapFor(record), now)).NotTo(Succeed())
-		Expect(store.AuthorizeDeployment(record.Key.TenantNamespace, record.Key.BundleSHA256, now)).NotTo(Succeed())
+		Expect(store.AuthorizeConfigMap(context.Background(), configMapFor(record), now)).NotTo(Succeed())
+		Expect(store.AuthorizeDeployment(context.Background(), record.Key.TenantNamespace, record.Key.BundleSHA256, now)).NotTo(Succeed())
 	})
 })
 

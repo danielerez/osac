@@ -6,6 +6,29 @@ global:
   fulfillmentTrust:
     enabled: false
     tenantNamespace: osac-csi
+    # Set both from the new tenant ClusterOrder when enabling trust.
+    clusterOrderUID: ""
+    tenant: ""
+    admission:
+      image:
+        repository: ghcr.io/osac-project/osac-operator
+        # Set to a published osac-operator version when enabling tenant trust.
+        tag: ""
+        pullPolicy: Always
+      # The tenant admission service uses the OpenShift service CA to issue
+      # and inject the serving certificate. This keeps private key material
+      # in a Kubernetes Secret instead of Helm values.
+      tlsSecretName: osac-fulfillment-trust-admission-tls
+      # The bootstrap hooks run /bin/sh and kubectl; the minimal kubectl image
+      # does not include a shell. OpenShift assigns a non-root UID via SCC.
+      bootstrapImage: quay.io/openshift/origin-cli:4.20.0
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi
 
 driverName: csi.osac.openshift.io
 

@@ -17,6 +17,7 @@ limitations under the License.
 package trustadmission
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -35,10 +36,10 @@ var (
 )
 
 type Store interface {
-	Publish(record ExpectedBundle) error
-	Revoke(key RecordKey) error
-	AuthorizeConfigMap(candidate *corev1.ConfigMap, now time.Time) error
-	AuthorizeDeployment(namespace, bundleSHA256 string, now time.Time) error
+	Publish(context.Context, ExpectedBundle) error
+	Revoke(context.Context, RecordKey) error
+	AuthorizeConfigMap(context.Context, *corev1.ConfigMap, time.Time) error
+	AuthorizeDeployment(context.Context, string, string, time.Time) error
 }
 
 type MemoryStore struct {
@@ -50,7 +51,7 @@ func NewStore() *MemoryStore {
 	return &MemoryStore{records: make(map[RecordKey]ExpectedBundle)}
 }
 
-func (s *MemoryStore) Publish(record ExpectedBundle) error {
+func (s *MemoryStore) Publish(_ context.Context, record ExpectedBundle) error {
 	if err := validateRecord(record); err != nil {
 		return err
 	}
@@ -62,14 +63,14 @@ func (s *MemoryStore) Publish(record ExpectedBundle) error {
 	return nil
 }
 
-func (s *MemoryStore) Revoke(key RecordKey) error {
+func (s *MemoryStore) Revoke(_ context.Context, key RecordKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.records, key)
 	return nil
 }
 
-func (s *MemoryStore) AuthorizeConfigMap(candidate *corev1.ConfigMap, now time.Time) error {
+func (s *MemoryStore) AuthorizeConfigMap(_ context.Context, candidate *corev1.ConfigMap, now time.Time) error {
 	if candidate == nil || candidate.Name != ConfigMapName || len(candidate.Data) != 1 || len(candidate.BinaryData) != 0 || candidate.Data[BundleDataKey] == "" || candidate.Immutable != nil || len(candidate.OwnerReferences) != 0 || len(candidate.Finalizers) != 0 || candidate.GenerateName != "" {
 		return errUnauthorizedConfigMap
 	}
@@ -91,7 +92,7 @@ func (s *MemoryStore) AuthorizeConfigMap(candidate *corev1.ConfigMap, now time.T
 	return nil
 }
 
-func (s *MemoryStore) AuthorizeDeployment(namespace, bundleSHA256 string, now time.Time) error {
+func (s *MemoryStore) AuthorizeDeployment(_ context.Context, namespace, bundleSHA256 string, now time.Time) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

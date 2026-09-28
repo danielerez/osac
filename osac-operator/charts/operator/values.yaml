@@ -34,6 +34,10 @@ stall:
 fulfillment:
   serverAddress: ""
   tokenFile: ""
+  tls:
+    caBundle:
+      configMap: ca-bundle
+      key: bundle.pem
   configMap:
     name: ""
     optional: true

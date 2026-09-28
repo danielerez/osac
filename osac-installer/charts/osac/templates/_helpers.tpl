@@ -113,7 +113,7 @@ Wait-for-fulfillment init container.
 Uses .Values.cliImage for the container image.
 */}}
 {{- define "osac.fulfillmentCurlTLS" -}}
-{{- if .Values.global.fulfillmentTrust.enabled -}}--cacert /etc/ca-bundle/bundle.pem{{- else -}}-k{{- end -}}
+--cacert /etc/ca-bundle/bundle.pem
 {{- end -}}
 
 {{- define "osac.waitForFulfillment" -}}
@@ -144,11 +144,9 @@ Uses .Values.cliImage for the container image.
   volumeMounts:
   - name: tmp
     mountPath: /tmp
-  {{- if .Values.global.fulfillmentTrust.enabled }}
   - name: ca-bundle
     mountPath: /etc/ca-bundle
     readOnly: true
-  {{- end }}
   resources:
     requests:
       cpu: 50m

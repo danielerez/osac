@@ -1,12 +1,14 @@
 {{- $trust := .Values.global.fulfillmentTrust -}}
-{{- if $trust.enabled }}
+{{- $orderUID := $trust.clusterOrderUID | default "" -}}
+{{- $tenant := $trust.tenant | default "" -}}
+{{- if and $trust.enabled (or $orderUID $tenant) }}
 {{- $namespace := $trust.tenantNamespace -}}
 {{- if ne $namespace (include "csi-driver.namespace" .) }}
 {{- fail "global.fulfillmentTrust.tenantNamespace must equal the CSI driver namespace when fulfillment trust is enabled" }}
 {{- end }}
 {{- $admissionImageTag := required "global.fulfillmentTrust.admission.image.tag must be set to a published osac-operator version when fulfillment trust is enabled" $trust.admission.image.tag -}}
-{{- $orderUID := required "global.fulfillmentTrust.clusterOrderUID is required when fulfillment trust is enabled" $trust.clusterOrderUID -}}
-{{- $tenant := required "global.fulfillmentTrust.tenant is required when fulfillment trust is enabled" $trust.tenant -}}
+{{- $orderUID = required "global.fulfillmentTrust.clusterOrderUID is required when fulfillment trust is enabled" $orderUID -}}
+{{- $tenant = required "global.fulfillmentTrust.tenant is required when fulfillment trust is enabled" $tenant -}}
 {{- if or (gt (len $orderUID) 42) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $orderUID)) }}
 {{- fail "global.fulfillmentTrust.clusterOrderUID must be a valid publisher identity suffix" }}
 {{- end }}
@@ -135,12 +137,22 @@ rules:
     resources: ["deployments"]
     resourceNames: [{{ $controllerDeploymentName | quote }}]
     verbs: ["patch"]
-  - apiGroups: ["apps"]
-    resources: ["replicasets"]
-    verbs: ["get", "list"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-sync
+  namespace: {{ $namespace }}
+  annotations:
+    {{- toYaml $attribution | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-fulfillment-trust-sync
+subjects:
+  - kind: ServiceAccount
+    name: {{ $syncServiceAccount }}
+    namespace: {{ $namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -153,10 +165,32 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["osac-fulfillment-ca"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-observer
+  namespace: {{ $namespace }}
+  annotations:
+    {{- toYaml $attribution | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-fulfillment-trust-observer
+subjects:
+  - kind: ServiceAccount
+    name: {{ $observerServiceAccount }}
+    namespace: {{ $namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -200,7 +234,7 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     resourceNames: [{{ printf "%s-fulfillment-trust-admission" $fullname | quote }}]
-    verbs: ["get", "watch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: [{{ $storeName | quote }}, {{ $tlsSecretName | quote }}]
@@ -210,16 +244,9 @@ rules:
     resourceNames: [{{ $storeName | quote }}, {{ $tlsSecretName | quote }}]
     verbs: ["delete", "patch"]
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles"]
-    resourceNames: [{{ printf "%s-fulfillment-trust-sync" $fullname | quote }}]
-    verbs: ["bind"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["rolebindings"]
-    verbs: ["create", "get"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["rolebindings"]
     resourceNames: [{{ printf "%s-fulfillment-trust-sync" $fullname | quote }}]
-    verbs: ["delete", "get", "patch"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -462,11 +489,16 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: bind-trust-sync
           image: {{ $bootstrapImage | quote }}
           imagePullPolicy: IfNotPresent
           env:
+            - name: HOME
+              value: /tmp
             - name: TRUST_TENANT
               value: {{ $tenant | quote }}
             - name: TRUST_ORDER_UID
@@ -484,14 +516,10 @@ spec:
               kubectl annotate secret/{{ $tlsSecretName }} -n {{ $namespace }} --overwrite \
                 "osac.openshift.io/tenant=${TRUST_TENANT}" \
                 "osac.openshift.io/owner-reference=${TRUST_ORDER_UID}"
-              kubectl create rolebinding {{ $fullname }}-fulfillment-trust-sync \
-                -n {{ $namespace }} \
-                --role={{ $fullname }}-fulfillment-trust-sync \
-                --serviceaccount={{ $namespace }}:{{ $syncServiceAccount }} \
-                --dry-run=client -o yaml | kubectl apply -n {{ $namespace }} -f -
-              kubectl annotate rolebinding/{{ $fullname }}-fulfillment-trust-sync -n {{ $namespace }} --overwrite \
-                "osac.openshift.io/tenant=${TRUST_TENANT}" \
-                "osac.openshift.io/owner-reference=${TRUST_ORDER_UID}"
+              kubectl get rolebinding/{{ $fullname }}-fulfillment-trust-sync -n {{ $namespace }} >/dev/null
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             {{- toYaml $trust.admission.resources | nindent 12 }}
           securityContext:
@@ -522,15 +550,23 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      volumes:
+        - name: tmp
+          emptyDir: {}
       containers:
         - name: remove-trust-sync-binding
           image: {{ $bootstrapImage | quote }}
           imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /tmp
           command: ["/bin/sh", "-ec"]
           args:
             - |-
-              kubectl delete rolebinding {{ $fullname }}-fulfillment-trust-sync -n {{ $namespace }} --ignore-not-found
               kubectl delete secret/{{ $storeName }} -n {{ $namespace }} --ignore-not-found
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           resources:
             {{- toYaml $trust.admission.resources | nindent 12 }}
           securityContext:

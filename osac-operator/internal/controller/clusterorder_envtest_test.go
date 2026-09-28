@@ -129,12 +129,6 @@ var _ = Describe("ClusterOrder Integration Tests", func() {
 		})
 
 		instance.Status.FulfillmentTrustBundleHash = "sha256:bundle"
-		instance.Status.FulfillmentTrustJobs = []osacv1alpha1.JobStatus{{
-			JobID:     "trust-job-1",
-			Type:      osacv1alpha1.JobTypeProvision,
-			Timestamp: metav1.Now(),
-			State:     osacv1alpha1.JobStateSucceeded,
-		}}
 		instance.SetStatusCondition(
 			string(osacv1alpha1.ClusterOrderConditionFulfillmentTrustReady),
 			metav1.ConditionTrue,
@@ -145,8 +139,6 @@ var _ = Describe("ClusterOrder Integration Tests", func() {
 
 		stored := getClusterOrder(name)
 		Expect(stored.Status.FulfillmentTrustBundleHash).To(Equal("sha256:bundle"))
-		Expect(stored.Status.FulfillmentTrustJobs).To(HaveLen(1))
-		Expect(stored.Status.FulfillmentTrustJobs[0].JobID).To(Equal("trust-job-1"))
 		Expect(stored.IsStatusConditionTrue(string(osacv1alpha1.ClusterOrderConditionFulfillmentTrustReady))).To(BeTrue())
 	})
 

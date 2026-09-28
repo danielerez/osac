@@ -22,9 +22,10 @@ import (
 	"google.golang.org/grpc/credentials/oauth"
 	experimentalcredentials "google.golang.org/grpc/experimental/credentials"
 	"google.golang.org/grpc/status"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-var fulfillmentClientBundleObserved = promauto.NewGaugeVec(prometheus.GaugeOpts{
+var fulfillmentClientBundleObserved = promauto.With(ctrlmetrics.Registry).NewGaugeVec(prometheus.GaugeOpts{
 	Name: "osac_fulfillment_client_bundle_observed",
 	Help: "The SHA-256 of the CA bundle last verified by the fulfillment client.",
 }, []string{"sha256"})
@@ -144,7 +145,8 @@ func verifiedCAPool(bundle []byte) (*x509.CertPool, error) {
 			return nil, fmt.Errorf("fulfillment CA file contains invalid PEM")
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil || !cert.IsCA || cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		if err != nil || (!cert.IsCA && cert.Version != 1) ||
+			(cert.KeyUsage != 0 && cert.KeyUsage&x509.KeyUsageCertSign == 0) {
 			return nil, fmt.Errorf("fulfillment CA file contains an invalid CA certificate")
 		}
 		pool.AddCert(cert)

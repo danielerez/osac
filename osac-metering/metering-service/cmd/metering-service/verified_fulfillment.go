@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -38,6 +39,46 @@ type verifiedFulfillmentConn struct {
 	closed    bool
 	current   atomic.Pointer[grpc.ClientConn]
 	observed  atomic.Value
+}
+
+const (
+	verifiedFulfillmentStartupTimeout = 30 * time.Second
+	verifiedFulfillmentRetryInterval  = time.Second
+)
+
+func waitForVerifiedFulfillment(ctx context.Context, reload func(context.Context) error) error {
+	return waitForVerifiedFulfillmentWithPolicy(ctx, reload, verifiedFulfillmentStartupTimeout, verifiedFulfillmentRetryInterval)
+}
+
+func waitForVerifiedFulfillmentWithPolicy(
+	ctx context.Context, reload func(context.Context) error, timeout, retryInterval time.Duration,
+) error {
+	connectCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var lastErr error
+	for {
+		lastErr = reload(connectCtx)
+		if lastErr == nil {
+			return nil
+		}
+		// Retry only connection-probe timeouts. Invalid CA data and other
+		// configuration failures should fail immediately.
+		if !errors.Is(lastErr, context.DeadlineExceeded) {
+			return lastErr
+		}
+		if connectCtx.Err() != nil {
+			return fmt.Errorf("fulfillment service did not become ready within %s: %w", timeout, errors.Join(connectCtx.Err(), lastErr))
+		}
+
+		timer := time.NewTimer(retryInterval)
+		select {
+		case <-connectCtx.Done():
+			timer.Stop()
+			return fmt.Errorf("fulfillment service did not become ready within %s: %w", timeout, errors.Join(connectCtx.Err(), lastErr))
+		case <-timer.C:
+		}
+	}
 }
 
 func (v *verifiedFulfillmentConn) Invoke(ctx context.Context, method string, args, reply any, opts ...grpc.CallOption) error {
@@ -134,7 +175,8 @@ func verifiedCAPool(bundle []byte) (*x509.CertPool, error) {
 			return nil, fmt.Errorf("fulfillment CA file contains invalid PEM")
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil || !cert.IsCA || cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		if err != nil || (!cert.IsCA && cert.Version != 1) ||
+			(cert.KeyUsage != 0 && cert.KeyUsage&x509.KeyUsageCertSign == 0) {
 			return nil, fmt.Errorf("fulfillment CA file contains an invalid CA certificate")
 		}
 		pool.AddCert(cert)

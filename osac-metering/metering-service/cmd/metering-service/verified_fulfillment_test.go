@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http/httptest"
@@ -25,6 +26,38 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
+
+func TestWaitForVerifiedFulfillmentRetriesTransientProbeTimeouts(t *testing.T) {
+	attempts := 0
+	err := waitForVerifiedFulfillmentWithPolicy(context.Background(), func(context.Context) error {
+		attempts++
+		if attempts < 3 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForVerifiedFulfillmentWithPolicy() error = %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("reload attempts = %d, want 3", attempts)
+	}
+}
+
+func TestWaitForVerifiedFulfillmentDoesNotRetryConfigurationErrors(t *testing.T) {
+	wantErr := errors.New("invalid CA bundle")
+	attempts := 0
+	err := waitForVerifiedFulfillmentWithPolicy(context.Background(), func(context.Context) error {
+		attempts++
+		return wantErr
+	}, time.Second, time.Millisecond)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("waitForVerifiedFulfillmentWithPolicy() error = %v, want %v", err, wantErr)
+	}
+	if attempts != 1 {
+		t.Fatalf("reload attempts = %d, want 1", attempts)
+	}
+}
 
 func TestVerifiedFulfillmentConnUnavailableBeforeFirstHandshake(t *testing.T) {
 	client := &verifiedFulfillmentConn{}
@@ -126,7 +159,23 @@ func TestVerifiedFulfillmentBundleRotation(t *testing.T) {
 	}
 }
 
+func TestVerifiedCAPoolAllowsUnspecifiedKeyUsage(t *testing.T) {
+	if _, err := verifiedCAPool(makeTestCAWithKeyUsage(t, 0)); err != nil {
+		t.Fatalf("CA without an explicit key usage was rejected: %v", err)
+	}
+}
+
+func TestVerifiedCAPoolRejectsExplicitKeyUsageWithoutCertSign(t *testing.T) {
+	if _, err := verifiedCAPool(makeTestCAWithKeyUsage(t, x509.KeyUsageDigitalSignature)); err == nil {
+		t.Fatal("CA with an explicit key usage lacking CertSign was accepted")
+	}
+}
+
 func makeTestCA(t *testing.T) []byte {
+	return makeTestCAWithKeyUsage(t, x509.KeyUsageCertSign)
+}
+
+func makeTestCAWithKeyUsage(t *testing.T, keyUsage x509.KeyUsage) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -135,7 +184,7 @@ func makeTestCA(t *testing.T) []byte {
 	cert := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "wrong root"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, IsCA: true,
+		KeyUsage: keyUsage, BasicConstraintsValid: true, IsCA: true,
 	}
 	raw, err := x509.CreateCertificate(rand.Reader, cert, cert, &key.PublicKey, key)
 	if err != nil {

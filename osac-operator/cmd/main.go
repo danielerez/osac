@@ -20,6 +20,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -573,7 +574,7 @@ func setupStorageController(mgr mcmanager.Manager, grpcConn grpc.ClientConnInter
 // setupControllers registers all enabled controllers with the manager.
 func setupControllers(
 	mgr mcmanager.Manager, grpcConn grpc.ClientConnInterface,
-	flags *controllerFlags, maxJobHistory int,
+	flags *controllerFlags, maxJobHistory int, fulfillmentTrustSourceName string,
 ) error {
 	if flags.Cluster {
 		if err := setupClusterControllers(mgr, grpcConn, maxJobHistory); err != nil {
@@ -592,12 +593,11 @@ func setupControllers(
 			reconciler := &controller.FulfillmentTrustReconciler{
 				Client: local.GetClient(), APIReader: local.GetAPIReader(), Enabled: true,
 				ClusterOrderNamespace: namespace, SourceNamespace: namespace,
-				TenantNamespace: tenantNamespace, MaxJobHistory: maxJobHistory,
-				AAP: aap.NewClient(os.Getenv(envAAPURL), os.Getenv(envAAPToken),
-					helpers.GetEnvWithDefault(envAAPInsecureSkipVerify, false)),
-				Targets: &controller.SecretTrustTargetResolver{
-					Management: local.GetAPIReader(), Namespace: namespace,
-					TenantNamespace: tenantNamespace,
+				SourceName:      fulfillmentTrustSourceName,
+				TenantNamespace: tenantNamespace,
+				Targets: &controller.HostedClusterTrustTargetResolver{
+					Kubeconfigs: &controller.HostedClusterKubeconfigResolver{Management: local.GetAPIReader()},
+					Namespace:   tenantNamespace,
 				},
 			}
 			if err := reconciler.SetupWithManager(mgr); err != nil {
@@ -1278,7 +1278,8 @@ func main() {
 
 	cfg := ctrl.GetConfigOrDie()
 
-	mgr, err := mcmanager.New(cfg, remoteProvider, manager.Options{
+	fulfillmentTrustSourceName := controller.DefaultFulfillmentTrustSourceName
+	managerOptions := manager.Options{
 		Scheme:                 localScheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -1296,7 +1297,21 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+	if helpers.GetEnvWithDefault(envEnableFulfillmentTrust, false) && ctrlFlags.Cluster {
+		sourceNamespace := os.Getenv(envClusterOrderNamespace)
+		if sourceNamespace == "" {
+			setupLog.Error(
+				fmt.Errorf("fulfillment trust requires a ClusterOrder namespace"),
+				"invalid fulfillment trust cache configuration",
+			)
+			os.Exit(1)
+		}
+		managerOptions.Cache = fulfillmentTrustCacheOptions(
+			sourceNamespace, fulfillmentTrustSourceName, os.Getenv(envNetworkingNamespace),
+		)
+	}
+	mgr, err := mcmanager.New(cfg, remoteProvider, managerOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -1328,7 +1343,9 @@ func main() {
 			}
 			grpcConn = verified
 		} else {
-			legacy, dialErr := createGrpcConn(grpcPlaintext, grpcInsecure, grpcTokenFile, fulfillmentServerAddress)
+			legacy, dialErr := createGrpcConn(
+				grpcPlaintext, grpcInsecure, grpcTokenFile, fulfillmentServerAddress, fulfillmentCAFile,
+			)
 			if dialErr != nil {
 				setupLog.Error(dialErr, "failed to create gRPC connection to fulfillment service")
 				os.Exit(1)
@@ -1345,7 +1362,7 @@ func main() {
 	})
 	setupLog.Info("job history configuration", "maxJobs", maxJobHistory)
 
-	if err := setupControllers(mgr, grpcConn, ctrlFlags, maxJobHistory); err != nil {
+	if err := setupControllers(mgr, grpcConn, ctrlFlags, maxJobHistory, fulfillmentTrustSourceName); err != nil {
 		setupLog.Error(err, "unable to setup controllers")
 		os.Exit(1)
 	}
@@ -1418,7 +1435,11 @@ func ignoreCanceled(err error) error {
 }
 
 //nolint:nakedret
-func createGrpcConn(plaintext, insecure bool, tokenFile, serverAddress string) (result *grpc.ClientConn, err error) {
+func createGrpcConn(
+	plaintext, insecure bool,
+	tokenFile, serverAddress string,
+	caFiles ...string,
+) (result *grpc.ClientConn, err error) {
 	// Configure use of TLS:
 	var dialOpts []grpc.DialOption
 	var transportCreds credentials.TransportCredentials
@@ -1428,6 +1449,11 @@ func createGrpcConn(plaintext, insecure bool, tokenFile, serverAddress string) (
 		tlsConfig := &tls.Config{}
 		if insecure {
 			tlsConfig.InsecureSkipVerify = true
+		} else if len(caFiles) > 0 && caFiles[0] != "" {
+			tlsConfig.RootCAs, err = loadFulfillmentCAPool(caFiles[0])
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		// TODO: This should have been the non-experimental package, but we need to use this one because
@@ -1461,6 +1487,14 @@ func createGrpcConn(plaintext, insecure bool, tokenFile, serverAddress string) (
 
 	result = conn
 	return
+}
+
+func loadFulfillmentCAPool(caFile string) (*x509.CertPool, error) {
+	bundle, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read fulfillment CA bundle: %w", err)
+	}
+	return verifiedCAPool(bundle)
 }
 
 // fileTokenSource is a token source that reads the token from a file whenever it is needed.

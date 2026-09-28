@@ -933,7 +933,8 @@ controller_instance_groups: # noqa: var-naming[no-role-prefix]
   # The protected tenant credential is attached to the job at launch.  This
   # isolated group deliberately has no Secret or kubeconfig volume: Kubernetes
   # injects only the trust-sync ServiceAccount and Controller injects the
-  # selected credential into the runner at runtime.
+  # selected credential into the runner at runtime. The AAP Helm chart creates
+  # the dedicated ServiceAccount in this namespace.
   - name: "{{ aap_prefix }}-fulfillment-trust-sync-ig"
     is_container_group: true
     pod_spec_override: |

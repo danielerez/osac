@@ -241,9 +241,9 @@ var clusterOrderProvisioningStages = []string{
 //   - Deleting is reported through the DELETING state (see syncClusterOrderPhase and
 //     syncClusterOrderDelete), not as a condition.
 var clusterOrderUnsurfacedConditions = map[string]struct{}{
-	ckv1alpha1.ConditionNamespaceCreated:                        {},
-	ckv1alpha1.ConditionDeleting:                                {},
-	string(ckv1alpha1.ClusterOrderConditionAddOnOperatorsReady): {},
+	ckv1alpha1.ConditionNamespaceCreated:                          {},
+	ckv1alpha1.ConditionDeleting:                                  {},
+	string(ckv1alpha1.ClusterOrderConditionAddOnOperatorsReady):   {},
 	string(ckv1alpha1.ClusterOrderConditionFulfillmentTrustReady): {},
 }
 

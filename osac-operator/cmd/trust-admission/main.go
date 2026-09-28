@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -88,6 +89,20 @@ func run(tenantNamespace, tlsCertFile, tlsKeyFile string) error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
+		TLSConfig:         webhookTLSConfig(tlsCertFile, tlsKeyFile),
 	}
-	return server.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
+	return server.ListenAndServeTLS("", "")
+}
+
+func webhookTLSConfig(tlsCertFile, tlsKeyFile string) *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			certificate, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+			if err != nil {
+				return nil, fmt.Errorf("load webhook TLS key pair: %w", err)
+			}
+			return &certificate, nil
+		},
+	}
 }

@@ -280,13 +280,9 @@ type ClusterOrderStatus struct {
 	// One entry is recorded for each operator attempt.
 	// +kubebuilder:validation:Optional
 	AddOnOperatorJobs []AddOnOperatorJobStatus `json:"addOnOperatorJobs,omitempty"`
-	// FulfillmentTrustBundleHash is the hash of the last observed fulfillment trust bundle.
+	// FulfillmentTrustBundleHash is the hash of the last synchronized fulfillment trust bundle.
 	// +kubebuilder:validation:Optional
 	FulfillmentTrustBundleHash string `json:"fulfillmentTrustBundleHash,omitempty"`
-
-	// FulfillmentTrustJobs holds the bounded history of fulfillment trust synchronization jobs.
-	// +kubebuilder:validation:Optional
-	FulfillmentTrustJobs []JobStatus `json:"fulfillmentTrustJobs,omitempty"`
 
 	// DesiredConfigVersion is a hash of the current spec, used to detect spec changes
 	// that require re-provisioning.

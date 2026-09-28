@@ -146,12 +146,45 @@ Touched-area requirements: [component guide](../fulfillment-service/AGENTS.md#in
 Touched-area requirements: [component guide](../osac-installer/AGENTS.md#integration-testing).
 
 The `make fulfillment-trust-render-test` Helm contract renders the production
-umbrella chart with trust enabled and disabled. It asserts operator and metering
-CA projection, the enabled operator argument, and CA mounts and verified curl
-commands in every fulfillment hook Job. It checks rendered manifests only; it
-does not start the hooks or prove a deployed fulfillment endpoint accepts the
-certificate. The Kind `SUITE=fulfillment` target exercises deployed startup and
-API behavior, subject to the profile's configured CA and enabled services.
+umbrella chart with trust enabled and disabled. It asserts the operator trust
+reconciler gate and checks that CA mounts and verified
+curl commands remain present in both states. It checks rendered manifests only;
+it does not start the hooks or prove a deployed fulfillment endpoint accepts
+the certificate. The Kind
+`SUITE=fulfillment` target exercises deployed startup and API behavior, subject
+to the profile's configured CA and enabled services.
+
+### OSAC-5343 deployed enablement coverage
+
+The release E2E path adds these assertions to existing user journeys. The
+umbrella chart defaults `global.fulfillmentTrust.enabled=true`, which enables
+trust reconciliation for tenant-scoped ClusterOrders. Run release E2E only
+after the compatible admission image and tenant CSI trust chart are deployed
+and trust identities exist. The
+standard dev and CI profiles override this feature to disabled. Set
+`OSAC_FULFILLMENT_TRUST_E2E=true` only for the release suite. These tests use
+real Fulfillment Service, operator, tenant Kubernetes API, CSI, and (where
+enabled) Kafka/metering services; they do not use protocol test doubles. The
+test harness may read the hosted-cluster kubeconfig to inspect target state;
+the automatic trust path never sends it to an AAP job.
+
+| Case | Tier and owner | Location and command | Required boundary |
+|---|---|---|---|
+| CaaS trust and metering | E2E, OSAC-5547 | `METERING_ADAPTER_URL=<adapter> OSAC_FULFILLMENT_TRUST_E2E=true uv run pytest -n 0 tests/e2e/caas/sanity/test_cluster_create.py` from repo root | New ClusterOrder, real tenant ConfigMap, verified management clients, event delivery. |
+| Tenant CSI rollout | E2E, OSAC-5547 | `OSAC_FULFILLMENT_TRUST_E2E=true uv run pytest -n 0 tests/e2e/storage/test_caas_cluster_storage.py` from repo root | Real tenant CSI Deployment and storage provisioning. |
+| VMaaS and BMaaS feedback | E2E, OSAC-5547 | `METERING_ADAPTER_URL=<adapter> OSAC_FULFILLMENT_TRUST_E2E=true uv run pytest -n 0 tests/e2e/vmaas/regression/test_compute_instance_creation.py tests/e2e/bmaas/sanity/test_baremetal_instance_lifecycle.py` from repo root | Deployed resource lifecycle and verified operator connection. |
+| Installer hooks and AAP publishing | E2E, OSAC-5547 | `uv run pytest -n 0 tests/e2e/enablement/test_installer_trust.py` from repo root | Deployed Helm post-install hooks and successful AAP template publish. |
+| Overlapping-root rotation | E2E release gate, OSAC-5547 | `OSAC_TRUST_ROTATION_PHASE=overlap OSAC_TRUST_ROTATION_EXPECTED_HASH=<sha256> OSAC_TRUST_LEAF_ENDPOINT=<dns:port> OSAC_TRUST_OLD_ROOT_PEM_PATH=<file> OSAC_TRUST_NEW_ROOT_PEM_PATH=<file> uv run pytest -n 0 tests/e2e/enablement/test_ca_rotation_gate.py` from repo root; repeat with `OSAC_TRUST_ROTATION_PHASE=post-switch` and `OSAC_TRUST_ROTATION_PHASE=final` at the corresponding hash | All selected target hashes and CSI rollouts, operator and metering verified-client metrics, and leaf trust under the expected root before advancing rotation. |
+
+The rotation gate is read-only. The operator or administrator changes the
+Bundle sources and serving leaf between runs. A passing overlap run permits
+the leaf switch; a passing post-switch run permits old-root removal. The final
+run verifies convergence after old-root removal. The suite needs an environment
+with a published tenant admission image, a compatible tenant CSI chart and
+trust identities, fulfillment trust enabled, and a working external provider.
+Until that environment exists, collection is execution readiness only and
+does not count as a passed E2E boundary. Deployment and execution are owned by
+[OSAC-5547](https://redhat.atlassian.net/browse/OSAC-5547).
 
 ## osac-operator
 

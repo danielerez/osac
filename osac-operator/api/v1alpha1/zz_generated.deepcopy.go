@@ -242,13 +242,6 @@ func (in *ClusterOrderStatus) DeepCopyInto(out *ClusterOrderStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.FulfillmentTrustJobs != nil {
-		in, out := &in.FulfillmentTrustJobs, &out.FulfillmentTrustJobs
-		*out = make([]JobStatus, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
-	}
 	if in.NodeSets != nil {
 		in, out := &in.NodeSets, &out.NodeSets
 		*out = make([]NodeSetStatus, len(*in))

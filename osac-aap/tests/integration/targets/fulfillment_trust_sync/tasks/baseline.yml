@@ -42,7 +42,7 @@
             name: trust-enabled-csi
             namespace: "{{ _trust_namespace }}"
             labels:
-              app.kubernetes.io/name: csi-driver
+              app.kubernetes.io/name: csiDriver
               app.kubernetes.io/component: controller
               osac.openshift.io/fulfillment-trust-client: 'true'
           spec:
@@ -153,6 +153,7 @@
         - name: Record the rejected unapproved mutation
           ansible.builtin.set_fact:
             _unapproved_mutation_rejected: true
+          when: ansible_failed_task.name == 'Validate protected trust-sync launch input'
 
     - name: Check the rejected ConfigMap was not created
       kubernetes.core.k8s_info:

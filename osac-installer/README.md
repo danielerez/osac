@@ -183,7 +183,7 @@ make -C ../osac-csi-driver image-build \
   IMG=ghcr.io/osac-project/osac-csi-driver:latest \
   CONTAINER_TOOL="$CONTAINER_TOOL"
 "$CONTAINER_TOOL" build -t ghcr.io/osac-project/osac-ui:latest \
-  -f ../../osac-ui/Containerfile ../../osac-ui
+  -f ../osac-ui/Containerfile ../osac-ui
 
 make kind-load-images PLATFORM=kind PROFILE=dev-full NS=osac \
   CONTAINER_TOOL="$CONTAINER_TOOL"

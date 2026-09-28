@@ -29,8 +29,8 @@
           "properties": {
             "enabled": {
               "type": "boolean",
-              "description": "Enable fulfillment trust synchronization",
-              "default": false
+              "description": "Enable fulfillment trust synchronization for tenant-scoped ClusterOrders",
+              "default": true
             },
             "tenantNamespace": {
               "type": "string",
@@ -298,6 +298,28 @@
             "tokenFile": {
               "type": "string",
               "description": "Path to service account token file"
+            },
+            "tls": {
+              "type": "object",
+              "description": "Verified TLS settings for the operator fulfillment client",
+              "properties": {
+                "caBundle": {
+                  "type": "object",
+                  "description": "ConfigMap key containing the fulfillment CA bundle",
+                  "properties": {
+                    "configMap": {
+                      "type": "string",
+                      "default": "ca-bundle"
+                    },
+                    "key": {
+                      "type": "string",
+                      "default": "bundle.pem"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
             },
             "configMap": {
               "type": "object",
@@ -1842,6 +1864,33 @@
                   },
                   "additionalProperties": false
                 },
+                "tls": {
+                  "type": "object",
+                  "description": "TLS configuration for fulfillment connection (subchart default)",
+                  "properties": {
+                    "insecureSkipVerify": {
+                      "type": "boolean",
+                      "description": "Skip TLS certificate verification for the fulfillment endpoint",
+                      "default": false
+                    },
+                    "caBundle": {
+                      "type": "object",
+                      "description": "ConfigMap key containing the tenant fulfillment CA bundle",
+                      "properties": {
+                        "configMap": {
+                          "type": "string",
+                          "default": "ca-bundle"
+                        },
+                        "key": {
+                          "type": "string",
+                          "default": "bundle.pem"
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  },
+                  "additionalProperties": false
+                },
                 "allowStub": {
                   "type": "boolean",
                   "description": "Allow the CSI controller to use the in-memory volume stub when no fulfillment configuration is supplied",
@@ -1854,10 +1903,6 @@
                 "issuerUrl": {
                   "type": "string",
                   "description": "Direct fulfillment issuer URL override (subchart default)"
-                },
-                "tls": {
-                  "type": "object",
-                  "description": "TLS configuration for fulfillment connection (subchart default)"
                 }
               },
               "additionalProperties": false

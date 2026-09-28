@@ -149,7 +149,41 @@ func TestVerifiedFulfillmentConnValidatesConfigurationWithoutRequiringService(t 
 	}
 }
 
+func TestLoadFulfillmentCAPool(t *testing.T) {
+	caFile := filepath.Join(t.TempDir(), "bundle.pem")
+	if err := os.WriteFile(caFile, makeTestCA(t), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := loadFulfillmentCAPool(caFile)
+	if err != nil || pool == nil {
+		t.Fatalf("valid fulfillment CA bundle was rejected: %v", err)
+	}
+
+	if err := os.WriteFile(caFile, []byte("not PEM"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadFulfillmentCAPool(caFile); err == nil {
+		t.Fatal("invalid fulfillment CA bundle was accepted")
+	}
+}
+
+func TestVerifiedCAPoolAllowsUnspecifiedKeyUsage(t *testing.T) {
+	if _, err := verifiedCAPool(makeTestCAWithKeyUsage(t, 0)); err != nil {
+		t.Fatalf("CA without an explicit key usage was rejected: %v", err)
+	}
+}
+
+func TestVerifiedCAPoolRejectsExplicitKeyUsageWithoutCertSign(t *testing.T) {
+	if _, err := verifiedCAPool(makeTestCAWithKeyUsage(t, x509.KeyUsageDigitalSignature)); err == nil {
+		t.Fatal("CA with an explicit key usage lacking CertSign was accepted")
+	}
+}
+
 func makeTestCA(t *testing.T) []byte {
+	return makeTestCAWithKeyUsage(t, x509.KeyUsageCertSign)
+}
+
+func makeTestCAWithKeyUsage(t *testing.T, keyUsage x509.KeyUsage) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -158,7 +192,7 @@ func makeTestCA(t *testing.T) []byte {
 	cert := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "wrong root"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, IsCA: true,
+		KeyUsage: keyUsage, BasicConstraintsValid: true, IsCA: true,
 	}
 	raw, err := x509.CreateCertificate(rand.Reader, cert, cert, &key.PublicKey, key)
 	if err != nil {

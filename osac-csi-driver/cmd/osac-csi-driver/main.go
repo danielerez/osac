@@ -297,7 +297,8 @@ func fulfillmentCACertPool(pemData []byte) (*x509.CertPool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("contains an invalid certificate: %w", err)
 		}
-		if !certificate.IsCA || certificate.KeyUsage&x509.KeyUsageCertSign == 0 {
+		if (!certificate.IsCA && certificate.Version != 1) ||
+			(certificate.KeyUsage != 0 && certificate.KeyUsage&x509.KeyUsageCertSign == 0) {
 			return nil, fmt.Errorf("contains an invalid CA certificate")
 		}
 		pool.AddCert(certificate)

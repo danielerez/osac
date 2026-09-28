@@ -281,6 +281,13 @@ func TestFulfillmentTLSConfigFromCAFile(t *testing.T) {
 		}
 	})
 
+	t.Run("accepts a CA certificate with unspecified key usage", func(t *testing.T) {
+		caWithoutKeyUsage := newTestCertificateAuthorityWithKeyUsage(t, 0)
+		if _, err := fulfillmentTLSConfig(writeTestCAFile(t, caWithoutKeyUsage.pem), false); err != nil {
+			t.Fatalf("expected CA certificate with unspecified key usage to be accepted: %v", err)
+		}
+	})
+
 	t.Run("rejects a CA certificate without certificate-signing usage", func(t *testing.T) {
 		caWithoutCertSign := newTestCertificateAuthorityWithKeyUsage(t, x509.KeyUsageDigitalSignature)
 		if _, err := fulfillmentTLSConfig(writeTestCAFile(t, caWithoutCertSign.pem), false); err == nil {

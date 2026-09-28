@@ -57,6 +57,7 @@
     namespace: "{{ _fulfillment_trust_deployment.metadata.namespace }}"
     kubeconfig: "{{ lookup('ansible.builtin.env', 'K8S_AUTH_KUBECONFIG') }}"
   register: _fulfillment_trust_replica_sets
+  no_log: true
 
 - name: Record prior selected CSI ReplicaSets
   ansible.builtin.set_fact:
@@ -73,6 +74,7 @@
       item.metadata.annotations['deployment.kubernetes.io/revision'] | default('0') | int
       < _fulfillment_trust_rollout_deployment.resources[0].metadata.annotations['deployment.kubernetes.io/revision']
       | default('0') | int
+  no_log: true
 
 - name: Wait for prior selected CSI ReplicaSets to have no ready Pods
   kubernetes.core.k8s_info:
@@ -90,6 +92,7 @@
   loop: "{{ _fulfillment_trust_old_replica_set_names }}"
   loop_control:
     loop_var: _fulfillment_trust_old_replica_set_name
+  no_log: true
 
 - name: Build selected CSI pod label selectors
   ansible.builtin.set_fact:
@@ -105,6 +108,7 @@
     kubeconfig: "{{ lookup('ansible.builtin.env', 'K8S_AUTH_KUBECONFIG') }}"
     label_selectors: "{{ _fulfillment_trust_pod_label_selectors }}"
   register: _fulfillment_trust_rollout_pods
+  no_log: true
 
 - name: Record ready Pods from prior selected CSI ReplicaSets
   ansible.builtin.set_fact:
@@ -114,6 +118,7 @@
   when:
     - item.status.conditions | default([]) | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length > 0
     - item.metadata.ownerReferences | default([]) | selectattr('uid', 'in', _fulfillment_trust_old_replica_set_uids) | list | length > 0
+  no_log: true
 
 - name: Assert selected CSI controller has no ready Pod from a prior revision
   ansible.builtin.assert:

@@ -158,7 +158,7 @@ func run(ctx context.Context, logger logr.Logger, cfg *config) error {
 			return fmt.Errorf("TLS_CA_CERT is required for verified fulfillment trust")
 		}
 		verified := &verifiedFulfillmentConn{address: cfg.fulfillmentAddr, caFile: cfg.tlsCACert, tokenFile: cfg.fulfillmentToken}
-		if err := verified.reload(ctx); err != nil {
+		if err := waitForVerifiedFulfillment(ctx, verified.reload); err != nil {
 			return fmt.Errorf("verifying fulfillment service: %w", err)
 		}
 		logger.Info("verified fulfillment CA bundle", "sha256", verified.observedHash())

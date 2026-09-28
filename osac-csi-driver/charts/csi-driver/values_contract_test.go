@@ -12,16 +12,19 @@ import (
 func TestFulfillmentTrustDefaults(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 
-	for _, valuesPath := range []string{
-		"osac-installer/charts/osac/values.yaml",
-		"osac-operator/charts/operator/values.yaml",
-		"osac-csi-driver/charts/csi-driver/values.yaml",
+	for _, test := range []struct {
+		path    string
+		enabled bool
+	}{
+		{"osac-installer/charts/osac/values.yaml", true},
+		{"osac-operator/charts/operator/values.yaml", false},
+		{"osac-csi-driver/charts/csi-driver/values.yaml", false},
 	} {
-		values := readValues(t, filepath.Join(repoRoot, valuesPath))
+		values := readValues(t, filepath.Join(repoRoot, test.path))
 		global := valueObject(t, values, "global")
 		trust := valueObject(t, global, "fulfillmentTrust")
-		if trust["enabled"] != false || trust["tenantNamespace"] != "osac-csi" {
-			t.Errorf("%s does not define the disabled fulfillment trust defaults", valuesPath)
+		if trust["enabled"] != test.enabled || trust["tenantNamespace"] != "osac-csi" {
+			t.Errorf("%s has unexpected fulfillment trust defaults", test.path)
 		}
 	}
 
@@ -31,8 +34,8 @@ func TestFulfillmentTrustDefaults(t *testing.T) {
 	trustProperties := schemaObject(t, trust, "properties")
 
 	enabled := schemaObject(t, trustProperties, "enabled")
-	if enabled["type"] != "boolean" || enabled["default"] != false {
-		t.Error("installer schema does not schema the disabled fulfillment trust flag")
+	if enabled["type"] != "boolean" || enabled["default"] != true {
+		t.Error("installer schema does not schema the enabled fulfillment trust flag")
 	}
 
 	tenantNamespace := schemaObject(t, trustProperties, "tenantNamespace")

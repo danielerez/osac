@@ -1,6 +1,7 @@
 package trustadmission
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,13 +140,16 @@ func (h *ControlHandler) authorized(request *http.Request, name, orderUID, tenan
 	if token == "" || strings.ContainsAny(token, " \t\r\n") {
 		return false
 	}
-	review, err := h.Kube.AuthenticationV1().TokenReviews().Create(request.Context(),
+	ctx, cancel := context.WithTimeout(request.Context(), storeRequestTimeout)
+	defer cancel()
+
+	review, err := h.Kube.AuthenticationV1().TokenReviews().Create(ctx,
 		&authenticationv1.TokenReview{Spec: authenticationv1.TokenReviewSpec{Token: token}}, metav1.CreateOptions{})
 	if err != nil || !review.Status.Authenticated || review.Status.Error != "" ||
 		review.Status.User.Username != "system:serviceaccount:"+h.Namespace+":"+name {
 		return false
 	}
-	account, err := h.Kube.CoreV1().ServiceAccounts(h.Namespace).Get(request.Context(), name, metav1.GetOptions{})
+	account, err := h.Kube.CoreV1().ServiceAccounts(h.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil || review.Status.User.UID == "" || review.Status.User.UID != string(account.UID) ||
 		account.Annotations[OwnerReferenceAnnotation] != orderUID || account.Annotations[TenantAnnotation] == "" {
 		return false

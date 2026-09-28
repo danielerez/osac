@@ -116,14 +116,13 @@ spec:
       volumes:
       - name: tmp
         emptyDir: {}
-      {{- if .Values.global.fulfillmentTrust.enabled }}
+      # The wait-for-fulfillment init container uses this bundle to verify the API.
       - name: ca-bundle
         configMap:
           name: {{ .Values.service.certs.caBundle.configMap | required "service.certs.caBundle.configMap is required" }}
           items:
           - key: bundle.pem
             path: bundle.pem
-      {{- end }}
       serviceAccountName: {{ .Values.aap.serviceAccounts.osacSa }}
       restartPolicy: Never
 {{- end }}

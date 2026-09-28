@@ -20,7 +20,9 @@ global:
   fulfillment:
     endpoint: ""
   fulfillmentTrust:
-    enabled: false
+    # Enables trust reconciliation for tenant-scoped ClusterOrders.
+    # Development and CI profiles can override this until tenant trust support is installed.
+    enabled: true
     tenantNamespace: osac-csi
   # --- Service Enablement ---
   # Controls which service tiers are active across all OSAC components.
@@ -111,6 +113,10 @@ operator:
   fulfillment:
     serverAddress: "fulfillment-internal-api:8001"
     tokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    tls:
+      caBundle:
+        configMap: ca-bundle
+        key: bundle.pem
     configMap:
       name: "osac-fulfillment-config"
       optional: true
@@ -377,6 +383,10 @@ csiDriver:
         issuerUrlKey: OSAC_FULFILLMENT_ISSUER_URL
       credentials:
         secretName: osac-csi-driver-credentials
+      tls:
+        caBundle:
+          configMap: ca-bundle
+          key: bundle.pem
       allowStub: false
   image:
     repository: ghcr.io/osac-project/osac-csi-driver

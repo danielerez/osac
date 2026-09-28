@@ -81,9 +81,10 @@
     namespace: "{{ osac_job_vars.fulfillment_trust.tenant_namespace }}"
     kubeconfig: "{{ lookup('ansible.builtin.env', 'K8S_AUTH_KUBECONFIG') }}"
     label_selectors:
-      - app.kubernetes.io/name=csi-driver
+      - app.kubernetes.io/name in (csi-driver,csiDriver)
       - app.kubernetes.io/component=controller
   register: _fulfillment_trust_csi_candidates
+  no_log: true
 
 - name: Select trust-enabled CSI controller Deployments
   ansible.builtin.set_fact:
@@ -94,6 +95,7 @@
     _fulfillment_trust_csi_deployments: "{{ _fulfillment_trust_csi_deployments | default([]) + [item] }}"
   loop: "{{ _fulfillment_trust_csi_candidates.resources }}"
   when: item.metadata.labels['osac.openshift.io/fulfillment-trust-client'] | default('') == 'true'
+  no_log: true
 
 - name: Update the fulfillment CA hash on selected CSI controller Deployments
   ansible.builtin.include_tasks: rollout.yaml

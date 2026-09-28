@@ -1,3 +1,19 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package controller
 
 import (
@@ -7,6 +23,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"strings"
 	"time"
@@ -14,72 +31,117 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/rest"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	hypershiftv1beta1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	"github.com/osac-project/osac/osac-operator/api/v1alpha1"
 	"github.com/osac-project/osac/osac-operator/internal/trustadmission"
-	"github.com/osac-project/osac/osac-operator/pkg/aap"
 )
 
 type fakeTrustTarget struct {
-	current, unsupported bool
-	published, revoked   int
-	events               []string
+	currentHashes map[string]bool
+	unsupported   bool
+	autoConverge  bool
+	applyErr      error
+	published     []trustadmission.ExpectedBundle
+	applied       []string
+	revoked       []trustadmission.RecordKey
+	events        []string
 }
 
-func (t *fakeTrustTarget) Observe(_ context.Context, _ trustadmission.ExpectedBundle) (bool, bool, error) {
-	return t.current, t.unsupported, nil
+func (t *fakeTrustTarget) Observe(_ context.Context, expected trustadmission.ExpectedBundle) (bool, bool, error) {
+	return t.currentHashes[expected.Key.BundleSHA256], t.unsupported, nil
 }
-func (t *fakeTrustTarget) Publish(_ context.Context, _ trustadmission.ExpectedBundle) error {
-	t.published++
+func (t *fakeTrustTarget) Publish(_ context.Context, record trustadmission.ExpectedBundle) error {
+	t.published = append(t.published, record)
 	t.events = append(t.events, "publish")
 	return nil
 }
-func (t *fakeTrustTarget) Revoke(_ context.Context, _ trustadmission.RecordKey) error {
-	t.revoked++
+func (t *fakeTrustTarget) Apply(_ context.Context, record trustadmission.ExpectedBundle) error {
+	t.applied = append(t.applied, record.Key.BundleSHA256)
+	t.events = append(t.events, "apply")
+	if t.applyErr != nil {
+		return t.applyErr
+	}
+	if t.autoConverge {
+		t.currentHashes[record.Key.BundleSHA256] = true
+	}
+	return nil
+}
+func (t *fakeTrustTarget) Revoke(_ context.Context, key trustadmission.RecordKey) error {
+	t.revoked = append(t.revoked, key)
 	t.events = append(t.events, "revoke")
 	return nil
 }
-func (*fakeTrustTarget) CredentialID() int     { return 42 }
-func (*fakeTrustTarget) CredentialRef() string { return "aap:42" }
 
-type fakeTrustResolver struct{ target FulfillmentTrustTarget }
+type fakeTrustResolver struct {
+	target FulfillmentTrustTarget
+	err    error
+}
 
 func (r fakeTrustResolver) Resolve(_ context.Context, _ *v1alpha1.ClusterOrder) (FulfillmentTrustTarget, error) {
-	return r.target, nil
+	return r.target, r.err
 }
 
-type fakeTrustAAP struct {
-	launches      int
-	status        string
-	launchRequest aap.LaunchJobTemplateRequest
-	events        *[]string
+type fakeKubeconfigReader struct{ data []byte }
+
+func (r fakeKubeconfigReader) Read(context.Context, *v1alpha1.ClusterOrder) ([]byte, error) {
+	return r.data, nil
 }
 
-func (*fakeTrustAAP) GetTemplate(_ context.Context, _ string) (*aap.Template, error) {
-	return &aap.Template{ID: 7, Type: aap.TemplateTypeJob}, nil
+type fakeTrustTokenIssuer struct {
+	names []string
+	now   func() time.Time
 }
-func (a *fakeTrustAAP) LaunchJobTemplate(_ context.Context, request aap.LaunchJobTemplateRequest) (*aap.LaunchJobTemplateResponse, error) {
-	a.launches++
-	a.launchRequest = request
-	return &aap.LaunchJobTemplateResponse{JobID: 100 + a.launches}, nil
+
+func (i *fakeTrustTokenIssuer) Issue(_ context.Context, _ []byte, namespace, name, tenant, owner string) (TrustServiceAccountToken, error) {
+	Expect(namespace).To(Equal("osac-csi"))
+	Expect(tenant).To(Equal("tenant-a"))
+	Expect(owner).To(Equal("order-uid"))
+	i.names = append(i.names, name)
+	now := time.Now()
+	if i.now != nil {
+		now = i.now()
+	}
+	return TrustServiceAccountToken{Token: "scoped-" + name, ExpiresAt: now.Add(trustTokenLifetime)}, nil
 }
-func (a *fakeTrustAAP) GetJob(_ context.Context, _ string) (*aap.Job, error) {
-	return &aap.Job{Status: a.status}, nil
+
+type statusPatchConflictClient struct {
+	client.Client
+	beforeFirstPatch func(context.Context) error
+	patchCalls       int
 }
-func (a *fakeTrustAAP) CancelJob(_ context.Context, _ string) error {
-	*a.events = append(*a.events, "cancel")
-	return nil
+
+func (c *statusPatchConflictClient) Status() client.SubResourceWriter {
+	return &statusPatchConflictWriter{SubResourceWriter: c.Client.Status(), client: c}
+}
+
+type statusPatchConflictWriter struct {
+	client.SubResourceWriter
+	client *statusPatchConflictClient
+}
+
+func (w *statusPatchConflictWriter) Patch(
+	ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption,
+) error {
+	w.client.patchCalls++
+	if w.client.patchCalls == 1 && w.client.beforeFirstPatch != nil {
+		if err := w.client.beforeFirstPatch(ctx); err != nil {
+			return err
+		}
+	}
+	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
 }
 
 var _ = Describe("FulfillmentTrustReconciler", func() {
@@ -88,31 +150,24 @@ var _ = Describe("FulfillmentTrustReconciler", func() {
 		order      *v1alpha1.ClusterOrder
 		reconciler *FulfillmentTrustReconciler
 		target     *fakeTrustTarget
-		aapClient  *fakeTrustAAP
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		order = &v1alpha1.ClusterOrder{
-			ObjectMeta: metav1.ObjectMeta{
-				GenerateName: "trust-order-", Namespace: "default",
-				Annotations: map[string]string{
-					fulfillmentTrustOptInAnnotation: "true",
-					trustadmission.TenantAnnotation: "tenant-a",
-				},
+		order = &v1alpha1.ClusterOrder{ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "trust-order-", Namespace: "default",
+			Annotations: map[string]string{
+				trustadmission.TenantAnnotation: "tenant-a",
 			},
-			Spec: v1alpha1.ClusterOrderSpec{TemplateID: "test.template"},
-		}
+		}, Spec: v1alpha1.ClusterOrderSpec{TemplateID: "test.template"}}
 		Expect(k8sClient.Create(ctx, order)).To(Succeed())
-		order.Status.ClusterReference = &v1alpha1.ClusterOrderClusterReferenceType{HostedClusterName: "cluster"}
+		order.Status.ClusterReference = &v1alpha1.ClusterOrderClusterReferenceType{Namespace: "hosted", HostedClusterName: "cluster"}
 		Expect(k8sClient.Status().Update(ctx, order)).To(Succeed())
-		target = &fakeTrustTarget{}
-		aapClient = &fakeTrustAAP{status: "pending", events: &target.events}
+		target = &fakeTrustTarget{currentHashes: make(map[string]bool), autoConverge: true}
 		reconciler = &FulfillmentTrustReconciler{
 			Client: k8sClient, APIReader: k8sClient, Enabled: true,
 			ClusterOrderNamespace: "default", SourceNamespace: "default", TenantNamespace: "osac-csi",
-			SourceName: "missing", AAP: aapClient, Targets: fakeTrustResolver{target}, MaxJobHistory: 2,
-			PollInterval: time.Second,
+			SourceName: "missing", Targets: fakeTrustResolver{target: target}, PollInterval: time.Second,
 		}
 	})
 
@@ -125,9 +180,10 @@ var _ = Describe("FulfillmentTrustReconciler", func() {
 		}
 	})
 
-	reconcile := func() {
-		_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(order)})
+	reconcile := func() ctrlreconcile.Result {
+		result, err := reconciler.Reconcile(ctx, ctrlreconcile.Request{NamespacedName: client.ObjectKeyFromObject(order)})
 		ExpectWithOffset(1, err).NotTo(HaveOccurred())
+		return result
 	}
 	getOrder := func() *v1alpha1.ClusterOrder {
 		stored := &v1alpha1.ClusterOrder{}
@@ -148,236 +204,359 @@ var _ = Describe("FulfillmentTrustReconciler", func() {
 		reconciler.Enabled = false
 		reconcile()
 		Expect(getOrder().Status.Conditions).To(BeEmpty())
-		Expect(aapClient.launches).To(BeZero())
-		Expect(target.published).To(BeZero())
+		Expect(target.published).To(BeEmpty())
 	})
 
-	It("reports a missing source without launching", func() {
-		reconcile()
-		condition := getOrder().Status.Conditions[0]
-		Expect(condition.Reason).To(Equal("TrustBundleUnavailable"))
-		Expect(aapClient.launches).To(BeZero())
+	It("reports a missing source and retries", func() {
+		result := reconcile()
+		Expect(result.RequeueAfter).To(Equal(time.Second))
+		Expect(getOrder().Status.Conditions[0].Reason).To(Equal("TrustBundleUnavailable"))
+		Expect(target.published).To(BeEmpty())
 	})
 
-	It("reports missing protected credentials without launching or writing", func() {
+	It("preserves concurrent status updates while patching trust status", func() {
+		interceptor := &statusPatchConflictClient{Client: k8sClient}
+		interceptor.beforeFirstPatch = func(ctx context.Context) error {
+			concurrent := &v1alpha1.ClusterOrder{}
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(order), concurrent); err != nil {
+				return err
+			}
+			concurrent.SetStatusCondition("Progressing", metav1.ConditionTrue, "updated by another controller", "ConcurrentUpdate")
+			return k8sClient.Status().Update(ctx, concurrent)
+		}
+		reconciler.Client = interceptor
+
+		update := order.DeepCopy()
+		update.Status.FulfillmentTrustBundleHash = "expected-hash"
+		update.SetStatusCondition(string(v1alpha1.ClusterOrderConditionFulfillmentTrustReady), metav1.ConditionTrue,
+			"Trust bundle and CSI rollout verified", "TrustBundleSynchronized")
+		Expect(reconciler.patchStatus(ctx, update)).To(Succeed())
+
+		stored := getOrder()
+		Expect(stored.IsStatusConditionTrue("Progressing")).To(BeTrue())
+		Expect(stored.IsStatusConditionTrue(string(v1alpha1.ClusterOrderConditionFulfillmentTrustReady))).To(BeTrue())
+		Expect(stored.Status.FulfillmentTrustBundleHash).To(Equal("expected-hash"))
+		Expect(interceptor.patchCalls).To(Equal(2))
+	})
+
+	It("reports unavailable short-lived target access without publishing", func() {
 		addBundle()
-		reconciler.Targets = fakeTrustResolver{}
+		reconciler.Targets = fakeTrustResolver{err: errors.New("target unavailable")}
 		reconcile()
 		Expect(getOrder().Status.Conditions[0].Reason).To(Equal("KubeconfigNotAvailable"))
-		Expect(aapClient.launches).To(BeZero())
-		Expect(target.published).To(BeZero())
+		Expect(target.published).To(BeEmpty())
 	})
 
-	It("revokes and cancels an in-flight job when the source becomes invalid", func() {
+	It("publishes, applies and verifies trust without a per-order opt-in annotation", func() {
+		bundle := addBundle()
+		target.autoConverge = false
+		reconcile()
+		stored := getOrder()
+		Expect(stored.IsStatusConditionTrue(string(v1alpha1.ClusterOrderConditionFulfillmentTrustReady))).To(BeFalse())
+		Expect(stored.Status.FulfillmentTrustBundleHash).To(BeEmpty())
+		Expect(target.published).To(HaveLen(1))
+		Expect(target.published[0].BundlePEM).To(Equal(bundle))
+		Expect(target.applied).To(HaveLen(1))
+		Expect(strings.Join(target.events, ",")).To(Equal("publish,apply"))
+
+		target.currentHashes[target.applied[0]] = true
+		reconcile()
+		stored = getOrder()
+		Expect(stored.IsStatusConditionTrue(string(v1alpha1.ClusterOrderConditionFulfillmentTrustReady))).To(BeTrue())
+		Expect(stored.Status.FulfillmentTrustBundleHash).To(Equal(target.applied[0]))
+	})
+
+	It("repairs same-hash drift and applies a rotated CA before revoking the old record", func() {
 		addBundle()
 		reconcile()
+		oldHash := getOrder().Status.FulfillmentTrustBundleHash
+		Expect(oldHash).NotTo(BeEmpty())
+
+		target.currentHashes[oldHash] = false
+		reconcile()
+		Expect(target.applied).To(HaveLen(2))
+		Expect(getOrder().Status.FulfillmentTrustBundleHash).To(Equal(oldHash))
+
+		configMap := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: reconciler.SourceName}, configMap)).To(Succeed())
+		newBundle := testTrustPEM()
+		configMap.Data[trustadmission.BundleDataKey] = string(newBundle)
+		Expect(k8sClient.Update(ctx, configMap)).To(Succeed())
+		target.events = nil
+		reconcile()
+		Expect(target.applied).To(HaveLen(3))
+		Expect(target.revoked).To(HaveLen(1))
+		Expect(target.revoked[0].BundleSHA256).To(Equal(oldHash))
+		Expect(strings.Join(target.events, ",")).To(Equal("publish,apply,revoke"))
+		Expect(getOrder().Status.FulfillmentTrustBundleHash).NotTo(Equal(oldHash))
+	})
+
+	It("revokes the last authorization when the management bundle becomes invalid", func() {
+		addBundle()
+		reconcile()
+		oldHash := getOrder().Status.FulfillmentTrustBundleHash
 		configMap := &corev1.ConfigMap{}
 		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: reconciler.SourceName}, configMap)).To(Succeed())
 		configMap.Data[trustadmission.BundleDataKey] = "invalid PEM"
 		Expect(k8sClient.Update(ctx, configMap)).To(Succeed())
 
 		reconcile()
-		stored := getOrder()
-		Expect(stored.Status.Conditions[0].Reason).To(Equal("TrustBundleUnavailable"))
-		Expect(stored.Status.FulfillmentTrustJobs[0].State).To(Equal(v1alpha1.JobStateCanceled))
-		Expect(strings.Join(target.events, ",")).To(ContainSubstring("revoke,cancel"))
-		Expect(aapClient.launches).To(Equal(1))
+		Expect(getOrder().Status.Conditions[0].Reason).To(Equal("TrustBundleUnavailable"))
+		Expect(target.revoked).To(HaveLen(1))
+		Expect(target.revoked[0].BundleSHA256).To(Equal(oldHash))
 	})
 
-	It("revokes an old hash before launching a rotated bundle", func() {
-		addBundle()
-		reconcile()
-		configMap := &corev1.ConfigMap{}
-		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: reconciler.SourceName}, configMap)).To(Succeed())
-		configMap.Data[trustadmission.BundleDataKey] = string(testTrustPEM())
-		Expect(k8sClient.Update(ctx, configMap)).To(Succeed())
-
-		reconcile()
-		Expect(aapClient.launches).To(Equal(1))
-		Expect(getOrder().Status.FulfillmentTrustJobs[0].State).To(Equal(v1alpha1.JobStateCanceled))
-		Expect(strings.Join(target.events, ",")).To(ContainSubstring("revoke,cancel"))
-		reconcile()
-		Expect(aapClient.launches).To(Equal(2))
-		Expect(getOrder().Status.FulfillmentTrustJobs).To(HaveLen(2))
-	})
-
-	It("tracks one job, verifies the target, and relaunches on same-hash drift", func() {
-		bundle := addBundle()
-		reconcile()
-		stored := getOrder()
-		Expect(stored.Status.FulfillmentTrustJobs).To(HaveLen(1))
-		Expect(stored.Status.FulfillmentTrustBundleHash).To(BeEmpty())
-		Expect(aapClient.launches).To(Equal(1))
-		Expect(aapClient.launchRequest.CredentialIDs).To(Equal([]int{42}))
-		vars := aapClient.launchRequest.ExtraVars["osac_job_vars"].(map[string]any)
-		Expect(vars).NotTo(HaveKey("admin_kubeconfig"))
-		Expect(vars).NotTo(HaveKey("kubeconfig"))
-		Expect(vars["fulfillment_trust"].(map[string]string)["bundle_pem"]).To(Equal(string(bundle)))
-
-		reconcile()
-		Expect(aapClient.launches).To(Equal(1))
-		Expect(getOrder().Status.FulfillmentTrustBundleHash).To(BeEmpty())
-		aapClient.status = "successful"
-		reconcile()
-		Expect(getOrder().Status.FulfillmentTrustBundleHash).To(BeEmpty())
-		target.current = true
-		reconcile()
-		Expect(getOrder().IsStatusConditionTrue(string(v1alpha1.ClusterOrderConditionFulfillmentTrustReady))).To(BeTrue())
-		Expect(getOrder().Status.FulfillmentTrustBundleHash).NotTo(BeEmpty())
-		Expect(aapClient.launches).To(Equal(1))
-
-		target.current = false
-		reconcile()
-		Expect(aapClient.launches).To(Equal(2))
-		Expect(getOrder().Status.FulfillmentTrustJobs).To(HaveLen(2))
-	})
-
-	It("reports an unsupported CSI controller without launching", func() {
+	It("does not enable an unsupported CSI controller", func() {
 		addBundle()
 		target.unsupported = true
 		reconcile()
 		Expect(getOrder().Status.Conditions[0].Reason).To(Equal("CSIClientUpgradeRequired"))
-		Expect(aapClient.launches).To(BeZero())
+		Expect(target.applied).To(BeEmpty())
+		Expect(target.published).To(BeEmpty())
 	})
 
-	It("revokes the expected bundle before canceling on deletion", func() {
+	It("keeps trust false until a CSI trust client is installed", func() {
+		addBundle()
+		target.applyErr = errTrustClientUnavailable
+		reconcile()
+		Expect(getOrder().Status.Conditions[0].Reason).To(Equal("CSIClientUnavailable"))
+	})
+
+	It("fences the active authorization when a ClusterOrder is deleted", func() {
 		addBundle()
 		reconcile()
+		oldHash := getOrder().Status.FulfillmentTrustBundleHash
 		stored := getOrder()
 		stored.Finalizers = []string{"test.osac.openshift.io/finalizer"}
 		Expect(k8sClient.Update(ctx, stored)).To(Succeed())
 		Expect(k8sClient.Delete(ctx, stored)).To(Succeed())
 		reconcile()
-		Expect(target.events).To(ContainElements("revoke", "cancel"))
-		Expect(strings.Join(target.events, ",")).To(ContainSubstring("revoke,cancel"))
-		Expect(aapClient.launches).To(Equal(1))
+		Expect(target.revoked).To(HaveLen(1))
+		Expect(target.revoked[0].BundleSHA256).To(Equal(oldHash))
 	})
 })
 
 var _ = Describe("KubernetesTrustTarget", func() {
-	It("uses an observer identity that cannot write or read Secrets", func() {
-		ctx := context.Background()
-		serviceAccount := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{GenerateName: "trust-observer-", Namespace: "default"}}
-		Expect(k8sClient.Create(ctx, serviceAccount)).To(Succeed())
-		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, serviceAccount))).To(Succeed()) })
-		role := &rbacv1.Role{ObjectMeta: metav1.ObjectMeta{GenerateName: "trust-observer-", Namespace: "default"},
-			Rules: []rbacv1.PolicyRule{
-				{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{trustadmission.ConfigMapName}, Verbs: []string{"get", "list", "watch"}},
-				{APIGroups: []string{"apps"}, Resources: []string{"deployments", "replicasets"}, Verbs: []string{"get", "list", "watch"}},
-				{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "watch"}},
-			}}
-		Expect(k8sClient.Create(ctx, role)).To(Succeed())
-		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, role))).To(Succeed()) })
-		binding := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{GenerateName: "trust-observer-", Namespace: "default"},
-			RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
-			Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: serviceAccount.Name, Namespace: "default"}}}
-		Expect(k8sClient.Create(ctx, binding)).To(Succeed())
-		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, binding))).To(Succeed()) })
-		configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: trustadmission.ConfigMapName, Namespace: "default"}}
-		Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
-		DeferCleanup(func() { Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, configMap))).To(Succeed()) })
-
-		observerConfig := rest.CopyConfig(cfg)
-		observerConfig.Impersonate.UserName = "system:serviceaccount:default:" + serviceAccount.Name
-		observerConfig.Impersonate.Groups = []string{"system:serviceaccounts", "system:serviceaccounts:default", "system:authenticated"}
-		observer, err := client.New(observerConfig, client.Options{Scheme: k8sClient.Scheme()})
-		Expect(err).NotTo(HaveOccurred())
-		Eventually(func() error {
-			return observer.Get(ctx, client.ObjectKeyFromObject(configMap), &corev1.ConfigMap{})
-		}).Should(Succeed())
-		Expect(apierrors.IsForbidden(observer.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "unauthorized", Namespace: "default"}}))).To(BeTrue())
-		Expect(apierrors.IsForbidden(observer.Get(ctx, client.ObjectKey{Namespace: "default", Name: "private"}, &corev1.Secret{}))).To(BeTrue())
-	})
-
-	It("detects legacy CSI, stale rollout, and an old ready Pod", func() {
+	It("applies only the expected ConfigMap and CSI pod-template hash", func() {
 		ctx := context.Background()
 		bundle := testTrustPEM()
-		record := trustadmission.ExpectedBundle{
-			Key: trustadmission.RecordKey{ClusterOrderUID: "order-uid", TenantNamespace: "osac-csi",
-				ConfigMapName: trustadmission.ConfigMapName, BundleSHA256: "hash"},
-			Tenant: "tenant-a", OwnerReference: "order-uid", BundlePEM: bundle,
-		}
+		record := testExpectedBundle(bundle)
 		configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: trustadmission.ConfigMapName, Namespace: "osac-csi",
-			Annotations: map[string]string{trustadmission.TenantAnnotation: record.Tenant,
-				trustadmission.OwnerReferenceAnnotation: record.OwnerReference,
-				trustadmission.BundleHashAnnotation:     record.Key.BundleSHA256}},
-			Data: map[string]string{trustadmission.BundleDataKey: string(bundle)}}
-		deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "csi", Namespace: "osac-csi", UID: types.UID("dep-uid"), Generation: 2,
-			Labels: map[string]string{trustCSINameLabel: "csi-driver", trustCSIComponentLabel: "controller"}},
-			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{trustadmission.BundleHashAnnotation: "hash"}}}},
-			Status: appsv1.DeploymentStatus{ObservedGeneration: 2, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}}
-		one := int32(1)
-		deployment.Spec.Replicas = &one
+			Labels: map[string]string{"keep": "label"}, Annotations: map[string]string{"old": "annotation"},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "v1", Kind: "ConfigMap", Name: "owner", UID: "owner-uid"}},
+			Finalizers:      []string{"example.com/finalizer"}},
+			Data: map[string]string{"old": "data"}, BinaryData: map[string][]byte{"old": []byte("data")}}
+		deployment := testTrustDeployment()
+		deployment.Labels[trustadmission.TrustClientLabel] = labelValueTrue
+		writer := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(configMap, deployment).Build()
+		target := &KubernetesTrustTarget{Writer: writer, Namespace: "osac-csi"}
+		Expect(target.Apply(ctx, record)).To(Succeed())
+
+		storedConfigMap := &corev1.ConfigMap{}
+		Expect(writer.Get(ctx, client.ObjectKeyFromObject(configMap), storedConfigMap)).To(Succeed())
+		Expect(storedConfigMap.Data).To(Equal(map[string]string{trustadmission.BundleDataKey: string(bundle)}))
+		Expect(storedConfigMap.BinaryData).To(BeNil())
+		Expect(storedConfigMap.OwnerReferences).To(BeEmpty())
+		Expect(storedConfigMap.Finalizers).To(BeEmpty())
+		Expect(storedConfigMap.Labels).To(Equal(map[string]string{"keep": "label"}))
+		Expect(storedConfigMap.Annotations).To(Equal(trustAnnotations(record)))
+
+		storedDeployment := &appsv1.Deployment{}
+		Expect(writer.Get(ctx, client.ObjectKeyFromObject(deployment), storedDeployment)).To(Succeed())
+		Expect(storedDeployment.Spec.Template.Annotations[trustadmission.BundleHashAnnotation]).To(Equal(record.Key.BundleSHA256))
+		Expect(storedDeployment.Spec.Template.Spec.Containers).To(Equal(deployment.Spec.Template.Spec.Containers))
+	})
+
+	It("requires a trust-enabled CSI deployment and a fully ready rollout", func() {
+		ctx := context.Background()
+		record := testExpectedBundle(testTrustPEM())
+		configMap := trustConfigMap(record, "osac-csi")
+		deployment := testTrustDeployment()
+		deployment.Labels[trustadmission.TrustClientLabel] = labelValueTrue
+		deployment.Spec.Template.Annotations[trustadmission.BundleHashAnnotation] = record.Key.BundleSHA256
+		deployment.Status = appsv1.DeploymentStatus{ObservedGeneration: deployment.Generation, UpdatedReplicas: 1,
+			ReadyReplicas: 1, AvailableReplicas: 1}
 		observer := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(configMap, deployment).Build()
 		target := &KubernetesTrustTarget{Observer: observer, Namespace: "osac-csi"}
 		current, unsupported, err := target.Observe(ctx, record)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(current).To(BeFalse())
-		Expect(unsupported).To(BeTrue())
-
-		deployment.Labels[trustadmission.TrustClientLabel] = "true"
-		Expect(observer.Update(ctx, deployment)).To(Succeed())
-		current, unsupported, err = target.Observe(ctx, record)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(current).To(BeTrue())
 		Expect(unsupported).To(BeFalse())
+		Expect(current).To(BeTrue())
 
-		oldRS := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "osac-csi", UID: types.UID("rs-uid"),
-			OwnerReferences: []metav1.OwnerReference{{UID: deployment.UID}}},
-			Spec: appsv1.ReplicaSetSpec{Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{trustadmission.BundleHashAnnotation: "old"}}}}}
-		Expect(observer.Create(ctx, oldRS)).To(Succeed())
-		oldPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "osac-csi",
-			OwnerReferences: []metav1.OwnerReference{{UID: oldRS.UID}}},
-			Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
-		Expect(observer.Create(ctx, oldPod)).To(Succeed())
-		current, _, err = target.Observe(ctx, record)
+		deployment.Labels[trustadmission.TrustClientLabel] = "false"
+		Expect(observer.Update(ctx, deployment)).To(Succeed())
+		_, unsupported, err = target.Observe(ctx, record)
 		Expect(err).NotTo(HaveOccurred())
+		Expect(unsupported).To(BeTrue())
+	})
+
+	It("does not report ready when no CSI controller is installed", func() {
+		observer := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).Build()
+		target := &KubernetesTrustTarget{Observer: observer, Namespace: "osac-csi"}
+		current, unsupported, err := target.Observe(context.Background(), testExpectedBundle(testTrustPEM()))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(unsupported).To(BeFalse())
 		Expect(current).To(BeFalse())
+
+		target.Writer = fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).Build()
+		record := testExpectedBundle(testTrustPEM())
+		Expect(errors.Is(target.Apply(context.Background(), record), errTrustClientUnavailable)).To(BeTrue())
+		created := &corev1.ConfigMap{}
+		Expect(target.Writer.Get(context.Background(), client.ObjectKey{Namespace: "osac-csi", Name: trustadmission.ConfigMapName}, created)).To(Succeed())
 	})
 })
 
-var _ = Describe("SecretTrustTargetResolver", func() {
-	It("accepts distinct verified service-account credentials scoped to the order", func() {
-		ctx := context.Background()
-		order := &v1alpha1.ClusterOrder{ObjectMeta: metav1.ObjectMeta{UID: types.UID("order-uid"),
-			Annotations: map[string]string{trustadmission.TenantAnnotation: "tenant-a"}}}
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: trustCredentialsPrefix + string(order.UID), Namespace: "default",
-			Annotations: map[string]string{trustadmission.OwnerReferenceAnnotation: string(order.UID),
-				trustadmission.TenantAnnotation: "tenant-a"}},
-			Data: map[string][]byte{
-				trustObserverKubeconfigKey:  testTrustKubeconfig("observer-token"),
-				trustPublisherKubeconfigKey: testTrustKubeconfig("publisher-token"),
-				trustAAPCredentialIDKey:     []byte("42"),
-				trustAAPCredentialRefKey:    []byte("aap:42"),
-			}}
-		management := fake.NewClientBuilder().WithScheme(k8sClient.Scheme()).WithObjects(secret).Build()
-		resolver := &SecretTrustTargetResolver{Management: management, Namespace: "default", TenantNamespace: "osac-csi"}
-		target, err := resolver.Resolve(ctx, order)
+var _ = Describe("HostedClusterTrustTargetResolver", func() {
+	It("reads the kubeconfig referenced by the order's HostedControlPlane", func() {
+		scheme := runtime.NewScheme()
+		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(hypershiftv1beta1.AddToScheme(scheme)).To(Succeed())
+		const kubeconfig = "hosted-cluster-kubeconfig"
+		hcp := &hypershiftv1beta1.HostedControlPlane{ObjectMeta: metav1.ObjectMeta{Name: "tenant-cluster", Namespace: "hosted-tenant-cluster"},
+			Status: hypershiftv1beta1.HostedControlPlaneStatus{KubeConfig: &hypershiftv1beta1.KubeconfigSecretRef{
+				Name: "tenant-kubeconfig", Key: "value",
+			}}}
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "tenant-kubeconfig", Namespace: "hosted-tenant-cluster"},
+			Data: map[string][]byte{"value": []byte(kubeconfig)}}
+		management := fake.NewClientBuilder().WithScheme(scheme).WithObjects(hcp, secret).Build()
+		order := &v1alpha1.ClusterOrder{Status: v1alpha1.ClusterOrderStatus{ClusterReference: &v1alpha1.ClusterOrderClusterReferenceType{
+			Namespace: "hosted", HostedClusterName: "tenant-cluster",
+		}}}
+		data, err := (&HostedClusterKubeconfigResolver{Management: management}).Read(context.Background(), order)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(target.CredentialID()).To(Equal(42))
-		Expect(target.CredentialRef()).To(Equal("aap:42"))
+		Expect(string(data)).To(Equal(kubeconfig))
+	})
 
-		secret.Data[trustPublisherKubeconfigKey] = secret.Data[trustObserverKubeconfigKey]
-		Expect(management.Update(ctx, secret)).To(Succeed())
-		_, err = resolver.Resolve(ctx, order)
-		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).NotTo(ContainSubstring("observer-token"))
-		secret.Annotations[trustadmission.TenantAnnotation] = "another-tenant"
-		Expect(management.Update(ctx, secret)).To(Succeed())
-		_, err = resolver.Resolve(ctx, order)
+	It("uses distinct short-lived identities and caches them only until renewal is due", func() {
+		now := time.Now()
+		issuer := &fakeTrustTokenIssuer{now: func() time.Time { return now }}
+		resolver := &HostedClusterTrustTargetResolver{
+			Kubeconfigs: fakeKubeconfigReader{data: testTrustKubeconfig("management-admin-token")},
+			Issuer:      issuer, Namespace: "osac-csi", Now: func() time.Time { return now },
+		}
+		order := &v1alpha1.ClusterOrder{ObjectMeta: metav1.ObjectMeta{Namespace: "orders", Name: "order-one", UID: types.UID("order-uid"), Annotations: map[string]string{
+			trustadmission.TenantAnnotation: "tenant-a",
+		}}}
+		first, err := resolver.Resolve(context.Background(), order)
+		Expect(err).NotTo(HaveOccurred())
+		second, err := resolver.Resolve(context.Background(), order)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(second).To(BeIdenticalTo(first))
+		Expect(issuer.names).To(ConsistOf(trustObserverServiceAccount, trustadmission.TrustSyncServiceAccount,
+			"osac-trust-publisher-order-uid"))
+		Expect(issuer.names).To(HaveLen(3))
+
+		now = now.Add(10 * time.Minute)
+		_, err = resolver.Resolve(context.Background(), order)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(issuer.names).To(HaveLen(6))
+		resolver.ForgetByOrder(client.ObjectKeyFromObject(order))
+		Expect(resolver.cache).NotTo(HaveKey("orders/order-one"))
+	})
+
+	It("requires verified TLS and removes admin credentials from scoped clients", func() {
+		data := testTrustKubeconfig("management-admin-token")
+		config, err := verifiedHostedClusterConfig(data)
+		Expect(err).NotTo(HaveOccurred())
+		scoped, err := trustServiceAccountConfig(config, "short-lived-token")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(scoped.BearerToken).To(Equal("short-lived-token"))
+		Expect(scoped.BearerToken).NotTo(Equal(config.BearerToken))
+		Expect(scoped.CAData).To(Equal(config.CAData))
+		Expect(scoped.Insecure).To(BeFalse())
+		Expect(scoped.Timeout).To(Equal(trustKubeAPITimeout))
+
+		insecure := clientcmdapi.NewConfig()
+		insecure.Clusters["tenant"] = &clientcmdapi.Cluster{Server: "https://tenant.example.invalid",
+			InsecureSkipTLSVerify: true, CertificateAuthorityData: testTrustPEM()}
+		insecure.AuthInfos["management"] = &clientcmdapi.AuthInfo{Token: "management-admin-token"}
+		insecure.Contexts["tenant"] = &clientcmdapi.Context{Cluster: "tenant", AuthInfo: "management"}
+		insecure.CurrentContext = "tenant"
+		_, err = verifiedHostedClusterConfig(mustWriteKubeconfig(insecure))
 		Expect(err).To(HaveOccurred())
 	})
+
+	It("checks tenant and owner annotations before requesting a bounded token", func() {
+		now := time.Now()
+		account := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: trustObserverServiceAccount, Namespace: "osac-csi",
+			UID: types.UID("observer-uid"), Annotations: map[string]string{
+				trustadmission.TenantAnnotation: "tenant-a", trustadmission.OwnerReferenceAnnotation: "order-uid",
+			}}}
+		kube := k8sfake.NewSimpleClientset(account)
+		called := false
+		kube.PrependReactor("create", "serviceaccounts", func(action clienttesting.Action) (bool, runtime.Object, error) {
+			if action.GetSubresource() != "token" {
+				return false, nil, nil
+			}
+			called = true
+			request := action.(clienttesting.CreateAction).GetObject().(*authenticationv1.TokenRequest)
+			Expect(request.Spec.ExpirationSeconds).NotTo(BeNil())
+			Expect(*request.Spec.ExpirationSeconds).To(Equal(int64(600)))
+			return true, &authenticationv1.TokenRequest{Status: authenticationv1.TokenRequestStatus{
+				Token: "ephemeral-token", ExpirationTimestamp: metav1.NewTime(now.Add(trustTokenLifetime)),
+			}}, nil
+		})
+		issuer := &KubernetesTrustTokenIssuer{Now: func() time.Time { return now }}
+		issued, err := issuer.issueWithClient(context.Background(), kube, "osac-csi", trustObserverServiceAccount, "tenant-a", "order-uid")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(called).To(BeTrue())
+		Expect(issued.Token).To(Equal("ephemeral-token"))
+		Expect(issued.ExpiresAt).To(Equal(now.Add(trustTokenLifetime)))
+
+		called = false
+		_, err = issuer.issueWithClient(context.Background(), kube, "osac-csi", trustObserverServiceAccount, "tenant-b", "order-uid")
+		Expect(err).To(HaveOccurred())
+		Expect(called).To(BeFalse())
+
+		rotated := account.DeepCopy()
+		tracingKube := k8sfake.NewSimpleClientset(rotated)
+		tracingKube.PrependReactor("create", "serviceaccounts", func(action clienttesting.Action) (bool, runtime.Object, error) {
+			if action.GetSubresource() != "token" {
+				return false, nil, nil
+			}
+			object, getErr := tracingKube.Tracker().Get(corev1.SchemeGroupVersion.WithResource("serviceaccounts"), "osac-csi", trustObserverServiceAccount)
+			Expect(getErr).NotTo(HaveOccurred())
+			updated := object.(*corev1.ServiceAccount).DeepCopy()
+			updated.Annotations[trustadmission.OwnerReferenceAnnotation] = "replacement-order"
+			Expect(tracingKube.Tracker().Update(corev1.SchemeGroupVersion.WithResource("serviceaccounts"), updated, "osac-csi")).To(Succeed())
+			return true, &authenticationv1.TokenRequest{Status: authenticationv1.TokenRequestStatus{
+				Token: "stale-identity-token", ExpirationTimestamp: metav1.NewTime(now.Add(trustTokenLifetime)),
+			}}, nil
+		})
+		_, err = issuer.issueWithClient(context.Background(), tracingKube, "osac-csi", trustObserverServiceAccount, "tenant-a", "order-uid")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("changed during token request"))
+	})
 })
+
+func testTrustDeployment() *appsv1.Deployment {
+	one := int32(1)
+	return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "csi-controller", Namespace: "osac-csi", UID: types.UID("deployment-uid"),
+		Generation: 1, Labels: map[string]string{trustCSINameLabel: "csiDriver", trustCSIComponentLabel: "controller"}},
+		Spec: appsv1.DeploymentSpec{Replicas: &one, Template: corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "csi-controller", Image: "example.invalid/csi:latest"}}},
+		}},
+		Status: appsv1.DeploymentStatus{ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}}
+}
+
+func testExpectedBundle(bundle []byte) trustadmission.ExpectedBundle {
+	return trustadmission.ExpectedBundle{Key: trustadmission.RecordKey{ClusterOrderUID: "order-uid", TenantNamespace: "osac-csi",
+		ConfigMapName: trustadmission.ConfigMapName, BundleSHA256: "bundle-hash"}, Tenant: "tenant-a", OwnerReference: "order-uid", BundlePEM: bundle}
+}
 
 func testTrustKubeconfig(token string) []byte {
 	config := clientcmdapi.NewConfig()
-	config.Clusters["tenant"] = &clientcmdapi.Cluster{Server: "https://tenant.example.invalid",
-		CertificateAuthorityData: testTrustPEM()}
-	config.AuthInfos["service-account"] = &clientcmdapi.AuthInfo{Token: token}
-	config.Contexts["tenant"] = &clientcmdapi.Context{Cluster: "tenant", AuthInfo: "service-account"}
+	config.Clusters["tenant"] = &clientcmdapi.Cluster{Server: "https://tenant.example.invalid", CertificateAuthorityData: testTrustPEM()}
+	config.AuthInfos["management"] = &clientcmdapi.AuthInfo{Token: token}
+	config.Contexts["tenant"] = &clientcmdapi.Context{Cluster: "tenant", AuthInfo: "management"}
 	config.CurrentContext = "tenant"
+	data, err := clientcmd.Write(*config)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred())
+	return data
+}
+
+func mustWriteKubeconfig(config *clientcmdapi.Config) []byte {
 	data, err := clientcmd.Write(*config)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred())
 	return data

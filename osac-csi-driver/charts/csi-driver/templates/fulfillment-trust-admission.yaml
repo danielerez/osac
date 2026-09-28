@@ -4,6 +4,7 @@
 {{- if ne $namespace (include "csi-driver.namespace" .) }}
 {{- fail "global.fulfillmentTrust.tenantNamespace must equal the CSI driver namespace when fulfillment trust is enabled" }}
 {{- end }}
+{{- $admissionImageTag := required "global.fulfillmentTrust.admission.image.tag must be set to a published osac-operator version when fulfillment trust is enabled" $trust.admission.image.tag -}}
 {{- $fullname := include "csi-driver.fullname" . }}
 {{- $tlsSecretName := $trust.admission.tlsSecretName | default "osac-fulfillment-trust-admission-tls" }}
 {{- $bootstrapImage := $trust.admission.bootstrapImage | default "registry.k8s.io/kubectl:v1.32.3" }}
@@ -239,7 +240,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: trust-admission
-          image: "{{ $trust.admission.image.repository }}:{{ $trust.admission.image.tag }}"
+          image: "{{ $trust.admission.image.repository }}:{{ $admissionImageTag }}"
           imagePullPolicy: {{ $trust.admission.image.pullPolicy }}
           command: ["/usr/local/bin/trust-admission"]
           args:
@@ -287,6 +288,9 @@ webhooks:
     sideEffects: None
     failurePolicy: Fail
     matchPolicy: Equivalent
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ $namespace | quote }}
     clientConfig:
       service:
         namespace: {{ $namespace }}
@@ -333,7 +337,7 @@ spec:
             - |-
               kubectl rollout status deployment/{{ $fullname }}-fulfillment-trust-admission --timeout=300s
               kubectl get validatingwebhookconfiguration/{{ $webhookName }}
-              kubectl get secret/{{ $storeName }} -o jsonpath='{.data.records\.json}' | grep -qx 'W10='
+              kubectl get secret/{{ $storeName }} -o jsonpath='{.data.records\.json}' | grep -q .
               kubectl get secret/{{ $tlsSecretName }} -o jsonpath='{.data.tls\.crt}' | grep -q .
               kubectl create rolebinding {{ $fullname }}-fulfillment-trust-sync \
                 --role={{ $fullname }}-fulfillment-trust-sync \

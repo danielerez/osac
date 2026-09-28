@@ -9,7 +9,8 @@ global:
     admission:
       image:
         repository: ghcr.io/osac-project/osac-operator
-        tag: latest
+        # Set to a published osac-operator version when enabling tenant trust.
+        tag: ""
         pullPolicy: Always
       # The tenant admission service uses the OpenShift service CA to issue
       # and inject the serving certificate. This keeps private key material

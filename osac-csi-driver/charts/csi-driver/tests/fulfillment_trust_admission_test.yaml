@@ -9,8 +9,10 @@ tests:
 
   - it: should render isolated trust identities and bind sync only after readiness
     set:
+      namespace: osac-csi
       global.fulfillmentTrust.enabled: true
       global.fulfillmentTrust.tenantNamespace: osac-csi
+      global.fulfillmentTrust.admission.image.tag: test-version
     asserts:
       - hasDocuments:
           count: 19
@@ -36,33 +38,41 @@ tests:
       - equal:
           path: rules[0].resources[0]
           value: secrets
-        documentIndex: 8
+        documentIndex: 6
       - equal:
           path: rules[0].resourceNames[0]
           value: osac-fulfillment-trust-expected-bundles
-        documentIndex: 8
+        documentIndex: 6
       - equal:
           path: rules[0].verbs
           value: [create]
-        documentIndex: 9
+        documentIndex: 8
       - equal:
           path: rules[1].resourceNames[0]
           value: osac-fulfillment-ca
-        documentIndex: 9
+        documentIndex: 8
       - equal:
           path: rules[0].verbs
           value: [get, list, watch]
-        documentIndex: 10
+        documentIndex: 9
       - notExists:
           path: rules[0].verbs[3]
-        documentIndex: 10
+        documentIndex: 9
       - equal:
           path: metadata.annotations["helm.sh/hook"]
           value: post-install,post-upgrade
         documentIndex: 17
+      - equal:
+          path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: osac-csi
+        documentIndex: 16
       - matchRegex:
           path: spec.template.spec.containers[0].args[0]
           pattern: "(?s)rollout status deployment.*validatingwebhookconfiguration.*expected-bundles.*create rolebinding"
+        documentIndex: 17
+      - notMatchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "grep -qx 'W10='"
         documentIndex: 17
       - equal:
           path: metadata.annotations["helm.sh/hook"]
@@ -76,3 +86,12 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: global.fulfillmentTrust.tenantNamespace must equal the CSI driver namespace when fulfillment trust is enabled
+
+  - it: should require a published admission image tag when trust is enabled
+    set:
+      namespace: osac-csi
+      global.fulfillmentTrust.enabled: true
+      global.fulfillmentTrust.tenantNamespace: osac-csi
+    asserts:
+      - failedTemplate:
+          errorMessage: global.fulfillmentTrust.admission.image.tag must be set to a published osac-operator version when fulfillment trust is enabled

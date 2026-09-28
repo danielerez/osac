@@ -106,8 +106,24 @@ tests:
           path: rules[3].verbs
           value: [patch]
         documentIndex: 7
+      - equal:
+          path: rules[4].resources[0]
+          value: replicasets
+        documentIndex: 7
+      - equal:
+          path: rules[4].verbs
+          value: [get, list]
+        documentIndex: 7
+      - equal:
+          path: rules[5].resources[0]
+          value: pods
+        documentIndex: 7
+      - equal:
+          path: rules[5].verbs
+          value: [get, list]
+        documentIndex: 7
       - notExists:
-          path: rules[4]
+          path: rules[6]
         documentIndex: 7
       - equal:
           path: rules[0].verbs

@@ -116,6 +116,8 @@ const (
 	envClusterControlPlaneStartingStallThreshold    = "OSAC_CLUSTER_CONTROL_PLANE_STARTING_STALL_THRESHOLD"
 	envClusterWorkersJoiningStallThreshold          = "OSAC_CLUSTER_WORKERS_JOINING_STALL_THRESHOLD"
 	envClusterWorkersJoiningStallThresholdOverrides = "OSAC_CLUSTER_WORKERS_JOINING_STALL_THRESHOLD_OVERRIDES"
+	envEnableFulfillmentTrust                       = "OSAC_ENABLE_FULFILLMENT_TRUST_RECONCILER"
+	envFulfillmentTrustTenantNamespace              = "OSAC_FULFILLMENT_TRUST_TENANT_NAMESPACE"
 
 	// Storage controller AAP template overrides
 	envStorageBackendProvisionTemplate   = "OSAC_STORAGE_BACKEND_AAP_PROVISION_TEMPLATE"
@@ -576,6 +578,31 @@ func setupControllers(
 	if flags.Cluster {
 		if err := setupClusterControllers(mgr, grpcConn, maxJobHistory); err != nil {
 			return fmt.Errorf("cluster controllers: %w", err)
+		}
+		if helpers.GetEnvWithDefault(envEnableFulfillmentTrust, false) {
+			local := mgr.GetLocalManager()
+			namespace := os.Getenv(envClusterOrderNamespace)
+			if namespace == "" {
+				return fmt.Errorf("fulfillment trust requires a ClusterOrder namespace")
+			}
+			tenantNamespace := os.Getenv(envFulfillmentTrustTenantNamespace)
+			if tenantNamespace == "" {
+				return fmt.Errorf("fulfillment trust requires a tenant namespace")
+			}
+			reconciler := &controller.FulfillmentTrustReconciler{
+				Client: local.GetClient(), APIReader: local.GetAPIReader(), Enabled: true,
+				ClusterOrderNamespace: namespace, SourceNamespace: namespace,
+				TenantNamespace: tenantNamespace, MaxJobHistory: maxJobHistory,
+				AAP: aap.NewClient(os.Getenv(envAAPURL), os.Getenv(envAAPToken),
+					helpers.GetEnvWithDefault(envAAPInsecureSkipVerify, false)),
+				Targets: &controller.SecretTrustTargetResolver{
+					Management: local.GetAPIReader(), Namespace: namespace,
+					TenantNamespace: tenantNamespace,
+				},
+			}
+			if err := reconciler.SetupWithManager(mgr); err != nil {
+				return fmt.Errorf("fulfillment trust controller: %w", err)
+			}
 		}
 	}
 	if flags.ComputeInstance {

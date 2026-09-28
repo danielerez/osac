@@ -146,6 +146,32 @@ enabled.
 - `OSAC_ENABLE_NETWORKING_CONTROLLER` — enable networking controllers
   (VirtualNetwork, Subnet, SecurityGroup) (truthy/falsy).
 
+### Fulfillment trust reconciliation (disabled by default)
+
+`OSAC_ENABLE_FULFILLMENT_TRUST_RECONCILER` registers the additional
+ClusterOrder trust reconciler only when the ClusterOrder controller is enabled.
+The Helm value `global.fulfillmentTrust.enabled` controls this flag and defaults
+to `false`; `global.fulfillmentTrust.tenantNamespace` sets the tenant CSI
+namespace (`OSAC_FULFILLMENT_TRUST_TENANT_NAMESPACE`). An individual order must
+also have `osac.openshift.io/fulfillment-trust-enabled: "true"` and the
+`osac.openshift.io/tenant` annotation. The reconciler reads `bundle.pem` from
+the management namespace's `ca-bundle` ConfigMap and reports
+`FulfillmentTrustReady` independently of the ordinary ClusterOrder controller.
+
+The enabled path requires a protected management Secret named
+`fulfillment-trust-<ClusterOrder UID>` in the ClusterOrder namespace. Its
+`osac.openshift.io/tenant` annotation must match the order, and its
+`osac.openshift.io/owner-reference` annotation must equal the order UID. The
+Secret must contain `observerKubeconfig` and `publisherKubeconfig` for distinct,
+TLS-verified tenant service accounts, plus `aapCredentialID` (a positive
+integer) and `aapCredentialRef`. The observer can read only the tenant trust
+ConfigMap and CSI rollout resources; the publisher can update only the
+admission expected-bundle Secret. The AAP credential must provide the separate
+tenant trust-sync identity consumed by `osac-sync-tenant-fulfillment-trust`.
+Provisioning these per-order credentials is an external prerequisite; the
+reconciler fails closed with `KubeconfigNotAvailable` when they are absent or
+invalid. It never puts a raw kubeconfig in AAP launch variables.
+
 See `config/samples/osac-config-secret.yaml` for a complete configuration
 example.
 

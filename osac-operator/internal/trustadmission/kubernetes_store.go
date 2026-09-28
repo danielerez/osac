@@ -58,6 +58,19 @@ func NewKubernetesStore(secrets corev1client.SecretsGetter, namespace string) (*
 	return &KubernetesStore{secrets: secrets, namespace: namespace}, nil
 }
 
+// Ready confirms that the protected store exists and can be decoded.
+func (s *KubernetesStore) Ready() error {
+	secret, err := s.secrets.Secrets(s.namespace).Get(context.Background(), ExpectedBundleStoreName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get expected bundle store: %w", err)
+	}
+	if len(secret.Data[expectedBundleStoreKey]) == 0 {
+		return fmt.Errorf("expected bundle store is uninitialized")
+	}
+	_, err = decodeRecords(secret.Data[expectedBundleStoreKey])
+	return err
+}
+
 func (s *KubernetesStore) Publish(record ExpectedBundle) error {
 	if err := validateRecord(record); err != nil {
 		return err

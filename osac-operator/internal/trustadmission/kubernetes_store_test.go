@@ -66,5 +66,12 @@ var _ = Describe("KubernetesStore", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		Expect(missingStore.AuthorizeConfigMap(configMapFor(record), now)).NotTo(Succeed())
+		Expect(missingStore.Ready()).NotTo(Succeed())
+	})
+
+	It("is not ready until the protected store has initialized records", func() {
+		Expect(store.(*trustadmission.KubernetesStore).Ready()).NotTo(Succeed())
+		Expect(store.Publish(record)).To(Succeed())
+		Expect(store.(*trustadmission.KubernetesStore).Ready()).To(Succeed())
 	})
 })

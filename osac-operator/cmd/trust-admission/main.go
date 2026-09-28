@@ -67,8 +67,17 @@ func run(tenantNamespace, tlsCertFile, tlsKeyFile string) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/validate", &admission.Webhook{Handler: handler})
+	mux.Handle(trustadmission.ControlPath, &trustadmission.ControlHandler{
+		Store: store, Kube: clientset, Namespace: tenantNamespace,
+	})
 	mux.HandleFunc("/healthz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, _ *http.Request) {
+		if err := store.Ready(); err != nil {
+			http.Error(writer, "protected store unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	})
 
 	server := &http.Server{Addr: ":8443", Handler: mux}
 	return server.ListenAndServeTLS(tlsCertFile, tlsKeyFile)

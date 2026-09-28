@@ -13,9 +13,11 @@ tests:
       global.fulfillmentTrust.enabled: true
       global.fulfillmentTrust.tenantNamespace: osac-csi
       global.fulfillmentTrust.admission.image.tag: test-version
+      global.fulfillmentTrust.clusterOrderUID: order-uid
+      global.fulfillmentTrust.tenant: tenant-a
     asserts:
       - hasDocuments:
-          count: 19
+          count: 22
       - isKind:
           of: ServiceAccount
         documentIndex: 0
@@ -33,51 +35,79 @@ tests:
         documentIndex: 3
       - equal:
           path: metadata.name
-          value: osac-fulfillment-trust-publisher
+          value: osac-trust-publisher-order-uid
+        documentIndex: 4
+      - equal:
+          path: metadata.annotations["osac.openshift.io/owner-reference"]
+          value: order-uid
+        documentIndex: 4
+      - equal:
+          path: metadata.annotations["osac.openshift.io/tenant"]
+          value: tenant-a
         documentIndex: 4
       - equal:
           path: rules[0].resources[0]
           value: secrets
-        documentIndex: 6
+        documentIndex: 5
       - equal:
           path: rules[0].resourceNames[0]
           value: osac-fulfillment-trust-expected-bundles
-        documentIndex: 6
+        documentIndex: 5
+      - equal:
+          path: rules[0].verbs
+          value: [get, update]
+        documentIndex: 5
       - equal:
           path: rules[0].verbs
           value: [create]
-        documentIndex: 8
+        documentIndex: 7
       - equal:
           path: rules[1].resourceNames[0]
           value: osac-fulfillment-ca
-        documentIndex: 8
+        documentIndex: 7
       - equal:
           path: rules[0].verbs
           value: [get, list, watch]
-        documentIndex: 9
+        documentIndex: 8
       - notExists:
           path: rules[0].verbs[3]
+        documentIndex: 8
+      - equal:
+          path: rules[0].resources[0]
+          value: services/proxy
         documentIndex: 9
+      - equal:
+          path: rules[0].resourceNames[0]
+          value: https:osac-fulfillment-trust-admission:https
+        documentIndex: 9
+      - equal:
+          path: rules[0].verbs
+          value: [create, delete]
+        documentIndex: 9
+      - equal:
+          path: rules[0].resources[0]
+          value: tokenreviews
+        documentIndex: 15
       - equal:
           path: metadata.annotations["helm.sh/hook"]
           value: post-install,post-upgrade
-        documentIndex: 17
+        documentIndex: 20
       - equal:
           path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: osac-csi
-        documentIndex: 16
+        documentIndex: 19
       - matchRegex:
           path: spec.template.spec.containers[0].args[0]
-          pattern: "(?s)rollout status deployment.*validatingwebhookconfiguration.*expected-bundles.*create rolebinding"
-        documentIndex: 17
+          pattern: "(?s)create secret.*rollout status deployment.*validatingwebhookconfiguration.*expected-bundles.*create rolebinding"
+        documentIndex: 20
       - notMatchRegex:
           path: spec.template.spec.containers[0].args[0]
           pattern: "grep -qx 'W10='"
-        documentIndex: 17
+        documentIndex: 20
       - equal:
           path: metadata.annotations["helm.sh/hook"]
           value: pre-delete
-        documentIndex: 18
+        documentIndex: 21
 
   - it: should reject a trust namespace that differs from the CSI namespace
     set:
@@ -95,3 +125,24 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: global.fulfillmentTrust.admission.image.tag must be set to a published osac-operator version when fulfillment trust is enabled
+
+  - it: should require a per-order publisher identity
+    set:
+      namespace: osac-csi
+      global.fulfillmentTrust.enabled: true
+      global.fulfillmentTrust.tenantNamespace: osac-csi
+      global.fulfillmentTrust.admission.image.tag: test-version
+    asserts:
+      - failedTemplate:
+          errorMessage: global.fulfillmentTrust.clusterOrderUID is required when fulfillment trust is enabled
+
+  - it: should require a tenant attribution for the publisher identity
+    set:
+      namespace: osac-csi
+      global.fulfillmentTrust.enabled: true
+      global.fulfillmentTrust.tenantNamespace: osac-csi
+      global.fulfillmentTrust.admission.image.tag: test-version
+      global.fulfillmentTrust.clusterOrderUID: order-uid
+    asserts:
+      - failedTemplate:
+          errorMessage: global.fulfillmentTrust.tenant is required when fulfillment trust is enabled

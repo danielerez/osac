@@ -6,6 +6,9 @@ global:
   fulfillmentTrust:
     enabled: false
     tenantNamespace: osac-csi
+    # Set both from the new tenant ClusterOrder when enabling trust.
+    clusterOrderUID: ""
+    tenant: ""
     admission:
       image:
         repository: ghcr.io/osac-project/osac-operator

@@ -5,6 +5,11 @@
 {{- fail "global.fulfillmentTrust.tenantNamespace must equal the CSI driver namespace when fulfillment trust is enabled" }}
 {{- end }}
 {{- $admissionImageTag := required "global.fulfillmentTrust.admission.image.tag must be set to a published osac-operator version when fulfillment trust is enabled" $trust.admission.image.tag -}}
+{{- $orderUID := required "global.fulfillmentTrust.clusterOrderUID is required when fulfillment trust is enabled" $trust.clusterOrderUID -}}
+{{- $tenant := required "global.fulfillmentTrust.tenant is required when fulfillment trust is enabled" $trust.tenant -}}
+{{- if or (gt (len $orderUID) 42) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $orderUID)) }}
+{{- fail "global.fulfillmentTrust.clusterOrderUID must be a valid publisher identity suffix" }}
+{{- end }}
 {{- $fullname := include "csi-driver.fullname" . }}
 {{- $tlsSecretName := $trust.admission.tlsSecretName | default "osac-fulfillment-trust-admission-tls" }}
 {{- $bootstrapImage := $trust.admission.bootstrapImage | default "registry.k8s.io/kubectl:v1.32.3" }}
@@ -12,7 +17,8 @@
 {{- $bootstrapServiceAccount := "osac-fulfillment-trust-bootstrap" }}
 {{- $syncServiceAccount := "osac-fulfillment-trust-sync" }}
 {{- $observerServiceAccount := "osac-fulfillment-trust-observer" }}
-{{- $publisherServiceAccount := "osac-fulfillment-trust-publisher" }}
+{{- $publisherServiceAccount := printf "osac-trust-publisher-%s" $orderUID }}
+{{- $admissionServiceName := "osac-fulfillment-trust-admission" }}
 {{- $storeName := "osac-fulfillment-trust-expected-bundles" }}
 {{- $webhookName := printf "%s-fulfillment-trust" $fullname | trunc 63 | trimSuffix "-" }}
 ---
@@ -60,18 +66,9 @@ metadata:
   labels:
     {{- include "csi-driver.labels" . | nindent 4 }}
     app.kubernetes.io/component: fulfillment-trust-publisher
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: {{ $storeName }}
-  namespace: {{ $namespace }}
-  labels:
-    {{- include "csi-driver.labels" . | nindent 4 }}
-    app.kubernetes.io/component: fulfillment-trust-admission
-type: Opaque
-stringData:
-  records.json: "[]"
+  annotations:
+    osac.openshift.io/tenant: {{ $tenant | quote }}
+    osac.openshift.io/owner-reference: {{ $orderUID | quote }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -82,6 +79,9 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: [{{ $storeName | quote }}]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -134,6 +134,33 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  name: {{ $fullname }}-fulfillment-trust-publisher
+  namespace: {{ $namespace }}
+rules:
+  # The admission service re-authenticates the publisher token and checks
+  # the ClusterOrder UID; this Role grants no direct Secret or workload write.
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: [{{ printf "https:%s:https" $admissionServiceName | quote }}]
+    verbs: ["create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-publisher
+  namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-fulfillment-trust-publisher
+subjects:
+  - kind: ServiceAccount
+    name: {{ $publisherServiceAccount }}
+    namespace: {{ $namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
   name: {{ $fullname }}-fulfillment-trust-bootstrap
   namespace: {{ $namespace }}
 rules:
@@ -145,6 +172,15 @@ rules:
     resources: ["secrets"]
     resourceNames: [{{ $storeName | quote }}, {{ $tlsSecretName | quote }}]
     verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $storeName | quote }}]
+    verbs: ["delete"]
+  # Secret creation cannot be restricted by resource name in Kubernetes RBAC.
+  # The bootstrap Job only creates the store if it does not already exist.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles"]
     resourceNames: [{{ printf "%s-fulfillment-trust-sync" $fullname | quote }}]
@@ -194,10 +230,32 @@ subjects:
     name: {{ $bootstrapServiceAccount }}
     namespace: {{ $namespace }}
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-tokenreview
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-fulfillment-trust-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-fulfillment-trust-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: {{ $admissionServiceAccount }}
+    namespace: {{ $namespace }}
+---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $fullname }}-fulfillment-trust-admission
+  name: {{ $admissionServiceName }}
   namespace: {{ $namespace }}
   annotations:
     service.beta.openshift.io/serving-cert-secret-name: {{ $tlsSecretName | quote }}
@@ -294,7 +352,7 @@ webhooks:
     clientConfig:
       service:
         namespace: {{ $namespace }}
-        name: {{ $fullname }}-fulfillment-trust-admission
+        name: {{ $admissionServiceName }}
         path: /validate
         port: 443
     rules:
@@ -335,14 +393,17 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |-
-              kubectl rollout status deployment/{{ $fullname }}-fulfillment-trust-admission --timeout=300s
+              kubectl get secret/{{ $storeName }} -n {{ $namespace }} >/dev/null 2>&1 || \
+                kubectl create secret generic {{ $storeName }} -n {{ $namespace }} --from-literal=records.json='[]'
+              kubectl rollout status deployment/{{ $fullname }}-fulfillment-trust-admission -n {{ $namespace }} --timeout=300s
               kubectl get validatingwebhookconfiguration/{{ $webhookName }}
-              kubectl get secret/{{ $storeName }} -o jsonpath='{.data.records\.json}' | grep -q .
-              kubectl get secret/{{ $tlsSecretName }} -o jsonpath='{.data.tls\.crt}' | grep -q .
+              kubectl get secret/{{ $storeName }} -n {{ $namespace }} -o jsonpath='{.data.records\.json}' | grep -q .
+              kubectl get secret/{{ $tlsSecretName }} -n {{ $namespace }} -o jsonpath='{.data.tls\.crt}' | grep -q .
               kubectl create rolebinding {{ $fullname }}-fulfillment-trust-sync \
+                -n {{ $namespace }} \
                 --role={{ $fullname }}-fulfillment-trust-sync \
                 --serviceaccount={{ $namespace }}:{{ $syncServiceAccount }} \
-                --dry-run=client -o yaml | kubectl apply -f -
+                --dry-run=client -o yaml | kubectl apply -n {{ $namespace }} -f -
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -373,7 +434,9 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-ec"]
           args:
-            - kubectl delete rolebinding {{ $fullname }}-fulfillment-trust-sync --ignore-not-found
+            - |-
+              kubectl delete rolebinding {{ $fullname }}-fulfillment-trust-sync -n {{ $namespace }} --ignore-not-found
+              kubectl delete secret/{{ $storeName }} -n {{ $namespace }} --ignore-not-found
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

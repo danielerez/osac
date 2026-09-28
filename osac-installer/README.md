@@ -164,7 +164,6 @@ the end-to-end "create a VM from the UI" experience:
 make install PLATFORM=kind PROFILE=dev-full NS=osac
 ```
 
-<<<<<<< HEAD
 To use source-built images, use the existing component build targets and then
 load the resulting image tags into Kind. Use the same `CONTAINER_TOOL` value for
 building and loading; the image names must remain registry-qualified so they
@@ -197,6 +196,7 @@ After changing source code, rerun the relevant component `image-build` target
 and then `kind-load-images`. Loaded images are restarted only for workloads that
 use one of the local image references. Each Go component also exposes a
 single-image `kind-load-image` target when loading only that component is useful.
+
 #### CUDN EVPN/Netris E2E environment
 
 `PROFILE=cudn-evpn-netris-test` is an explicit OpenShift-only profile. It

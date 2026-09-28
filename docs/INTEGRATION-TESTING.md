@@ -141,6 +141,18 @@ Touched-area requirements: [component guide](../fulfillment-service/AGENTS.md#in
 - **Provisioning journeys that cross into operators or providers:** Keep them in `tests/e2e/` and exercise those boundaries explicitly.
 - **Catalog Items:** `it/` checks creation and update behavior, publication visibility, CLI creation, and the ClusterOrder release image written by Fulfillment. Catalog-backed provisioning journeys that exercise other components remain in the CaaS, VMaaS, BMaaS, and reference E2E suites.
 
+## osac-installer
+
+Touched-area requirements: [component guide](../osac-installer/AGENTS.md#integration-testing).
+
+The `make fulfillment-trust-render-test` Helm contract renders the production
+umbrella chart with trust enabled and disabled. It asserts operator and metering
+CA projection, the enabled operator argument, and CA mounts and verified curl
+commands in every fulfillment hook Job. It checks rendered manifests only; it
+does not start the hooks or prove a deployed fulfillment endpoint accepts the
+certificate. The Kind `SUITE=fulfillment` target exercises deployed startup and
+API behavior, subject to the profile's configured CA and enabled services.
+
 ## osac-operator
 
 Touched-area requirements: [component guide](../osac-operator/AGENTS.md#integration-testing).
@@ -159,6 +171,7 @@ Touched-area requirements: [component guide](../osac-operator/AGENTS.md#integrat
 ### Coverage notes
 
 - **Pure helpers, validation, or state calculations:** Add error and edge-case coverage.
+- **Fulfillment client TLS:** `cmd/verified_fulfillment_test.go` probes a local TLS endpoint with valid and invalid CA/hostname cases, then checks bundle rotation and last-client retention. The production render check covers the operator mount and argument; the Kind suite covers deployment with the trust gate disabled. Neither suite proves a deployed fulfillment TLS endpoint.
 - **Controller reconciliation, finalizers, status, or CRD interactions:** The envtest suite must exercise the changed lifecycle through the public reconciler behavior.
 - **LVMS Volume lifecycle:** `lvms_vendor_provisioner_envtest_test.go` exercises RWO/RWOP provisioning, API-generated LogicalVolume names, persisted name/UID resumes, replacement while an old CR is terminating, and deletion through the public Volume reconciler. Stale parent snapshots are injected to verify authoritative reads prevent another create after context persistence. `volume_controller_test.go` injects status conflicts to verify newer vendor context, deletion and replacement UIDs are preserved. Kubernetes and etcd are real; the cached snapshots and TopoLVM status are simulated, and the TopoLVM CRD is a minimal fixture. Default-device-class selection, LVMD provisioning, and CSI mounting remain real-provider/E2E coverage under [OSAC-3711](https://redhat.atlassian.net/browse/OSAC-3711).
 - **Controller deployment, watches, RBAC, console proxy, networking, or Helm wiring:** Unit/envtest coverage alone does not prove deployed wiring.
@@ -226,6 +239,7 @@ applicable integration tests separately to validate workflow behavior.
 
 - **Filters, variable transforms, and isolated plugin logic:** Include invalid input and default handling.
 - **Ansible roles, workflow tasks, hooks, leases, finalizers, or Kubernetes resources:** The test must exercise the role/playbook through Ansible against Kind.
+- **Template publishing TLS:** The `test_cert_validation` play in `collections/ansible_collections/osac/service/roles/publish_templates/tests/test.yml` runs the real role against an untrusted local HTTPS endpoint and asserts certificate rejection before any authenticated HTTP request. The endpoint is a test double; it does not prove a deployed AAP or fulfillment boundary.
 - **Execution-environment definition or dependency inputs:** Image success does not prove the workflow boundary.
 - **AAP, OpenStack, KubeVirt/RHACM, or provider provisioning:** Kind-only tests with mocks cannot claim provider coverage.
 - **Storage-provider behavior:** The mock VMS server validates role logic, not the provider API.
@@ -287,6 +301,7 @@ Touched-area requirements: [component guide](../osac-metering/AGENTS.md#integrat
 
 - **Event schema or transition mapping:** Schema changes affect `schema/`, `metering-service/`, and `adapters/`.
 - **Projection/database code:** Do not set `SKIP_DB_TESTS` when validating database behavior.
+- **Fulfillment client TLS:** `metering-service/cmd/metering-service/verified_fulfillment_test.go` probes a local TLS endpoint with valid and invalid CA/hostname cases and checks bundle rotation and last-client retention. The production render check covers the CA mount and gate; the deployed Watch contract remains with [OSAC-4843](https://redhat.atlassian.net/browse/OSAC-4843).
 - **Kafka producer/consumer, CloudEvents transport, offsets, retries, or DLQ:** Mock Kafka tests alone do not prove the pipeline boundary.
 - **Fulfillment Watch or gRPC event ingestion:** Mock streams validate local handling, not the wire contract.
 - **Provider adapters:** The shared runner must remain the owner of ordering, retry, deduplication, and DLQ behavior.

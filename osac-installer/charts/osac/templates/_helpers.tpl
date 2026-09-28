@@ -112,6 +112,10 @@ kafka.clusterNamespace.
 Wait-for-fulfillment init container.
 Uses .Values.cliImage for the container image.
 */}}
+{{- define "osac.fulfillmentCurlTLS" -}}
+{{- if .Values.global.fulfillmentTrust.enabled -}}--cacert /etc/ca-bundle/bundle.pem{{- else -}}-k{{- end -}}
+{{- end -}}
+
 {{- define "osac.waitForFulfillment" -}}
 {{- $url := "https://fulfillment-rest-gateway:8000/healthz" -}}
 - name: wait-for-fulfillment
@@ -125,7 +129,7 @@ Uses .Values.cliImage for the container image.
       echo "Waiting for fulfillment REST gateway..."
       for i in $(seq 1 60); do
         echo "Attempt ${i}: checking {{ $url }}"
-        if curl -skf --connect-timeout 5 --max-time 30 {{ $url }}; then
+        if curl -sf {{ include "osac.fulfillmentCurlTLS" . }} --connect-timeout 5 --max-time 30 {{ $url }}; then
           echo ""
           echo "Fulfillment service is ready."
           exit 0
@@ -140,6 +144,11 @@ Uses .Values.cliImage for the container image.
   volumeMounts:
   - name: tmp
     mountPath: /tmp
+  {{- if .Values.global.fulfillmentTrust.enabled }}
+  - name: ca-bundle
+    mountPath: /etc/ca-bundle
+    readOnly: true
+  {{- end }}
   resources:
     requests:
       cpu: 50m

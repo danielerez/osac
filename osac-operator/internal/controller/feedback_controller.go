@@ -46,7 +46,7 @@ type FeedbackReconciler struct {
 }
 
 // NewFeedbackReconciler creates a reconciler that sends to the fulfillment service updates about cluster orders.
-func NewFeedbackReconciler(hubClient clnt.Client, grpcConn *grpc.ClientConn, clusterOrderNamespace string) *FeedbackReconciler {
+func NewFeedbackReconciler(hubClient clnt.Client, grpcConn grpc.ClientConnInterface, clusterOrderNamespace string) *FeedbackReconciler {
 	return &FeedbackReconciler{
 		bridge:                newClusterOrderFeedbackBridge(hubClient, privatev1.NewClustersClient(grpcConn)),
 		clusterOrderNamespace: clusterOrderNamespace,

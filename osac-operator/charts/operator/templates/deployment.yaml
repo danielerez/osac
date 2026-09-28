@@ -29,7 +29,11 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          {{- if .Values.global.fulfillmentTrust.enabled }}
+          - --fulfillment-ca-file=/etc/ca-bundle/bundle.pem
+          {{- else }}
           - --grpc-insecure
+          {{- end }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         envFrom:
@@ -176,5 +180,20 @@ spec:
           periodSeconds: 10
         resources:
           {{- toYaml .Values.resources | nindent 10 }}
+        {{- if .Values.global.fulfillmentTrust.enabled }}
+        volumeMounts:
+          - name: fulfillment-ca-bundle
+            mountPath: /etc/ca-bundle
+            readOnly: true
+        {{- end }}
+      {{- if .Values.global.fulfillmentTrust.enabled }}
+      volumes:
+        - name: fulfillment-ca-bundle
+          configMap:
+            name: {{ .Values.fulfillment.tls.caBundle.configMap | required "fulfillment.tls.caBundle.configMap is required" }}
+            items:
+              - key: {{ .Values.fulfillment.tls.caBundle.key | required "fulfillment.tls.caBundle.key is required" }}
+                path: bundle.pem
+      {{- end }}
       serviceAccountName: {{ include "osac-operator.serviceAccountName" . }}
       terminationGracePeriodSeconds: 10

@@ -65,8 +65,6 @@ service:
     issuerUrl: https://keycloak.keycloak.svc.cluster.local:8443/realms/osac
     emergencyServiceAccounts:
       - admin
-      - osac-operator
-      - osac-operator-controller-manager
     controllerCredentials:
       - secret:
           name: fulfillment-controller-credentials

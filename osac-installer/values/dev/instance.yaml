@@ -58,8 +58,6 @@ service:
     issuerUrl: https://keycloak.keycloak.svc.cluster.local/realms/osac
     emergencyServiceAccounts:
     - admin
-    - osac-operator
-    - osac-operator-controller-manager
     - template-publisher
     - osac-metering
     controllerCredentials:

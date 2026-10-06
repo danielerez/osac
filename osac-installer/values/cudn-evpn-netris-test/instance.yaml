@@ -110,8 +110,6 @@ service:
     # issuerUrl defaults to a global.clusterDomain-backed route URL.
     emergencyServiceAccounts:
     - admin
-    - osac-operator
-    - osac-operator-controller-manager
     - template-publisher
     - osac-metering
     controllerCredentials:

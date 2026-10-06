@@ -35,6 +35,7 @@ def render(
     csi: bool = False,
     custom_auth_credentials: bool = False,
     openshift: bool = False,
+    server_address: str | None = None,
 ) -> list[str]:
     cmd = [
         "helm",
@@ -75,6 +76,8 @@ def render(
         cmd.extend(("--set", "csiDriver.enabled=true"))
     if openshift:
         cmd.extend(("--api-versions", "security.openshift.io/v1"))
+    if server_address is not None:
+        cmd.extend(("--set", f"operator.fulfillment.serverAddress={server_address}"))
     manifest = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
     return [doc for doc in manifest.split("\n---\n") if doc.strip()]
 
@@ -172,7 +175,16 @@ def check(enabled: bool) -> None:
     docs = render(enabled)
     openshift_docs = render(enabled, openshift=True)
     operator = select(docs, "osac/charts/operator/templates/deployment.yaml")
+    runtime_config = select(docs, "osac/templates/fulfillment-runtime-config.yaml")
     metering = select(docs, "osac/charts/metering/templates/deployment.yaml")
+    assert 'name: "osac-fulfillment-config"' in runtime_config
+    assert "OSAC_FULFILLMENT_ISSUER_URL:" in runtime_config
+    assert "OSAC_FULFILLMENT_TOKEN_FILE" not in operator
+    assert "OSAC_FULFILLMENT_CLIENT_ID" in operator
+    assert "OSAC_FULFILLMENT_CLIENT_SECRET" in operator
+    assert "name: fulfillment-controller-credentials" in operator
+    assert "key: client-id" in operator
+    assert "key: client-secret" in operator
     assert "mountPath: /etc/ca-bundle" in metering
     assert "readOnly: true" in metering
     assert "key: bundle.pem" in metering
@@ -329,6 +341,14 @@ def check_profile_emergency_service_accounts() -> None:
         assert accounts == expected_accounts, profile
 
 
+def check_operator_fulfillment_can_be_disabled() -> None:
+    docs = render(False, server_address="")
+    operator = select(docs, "osac/charts/operator/templates/deployment.yaml")
+    assert "OSAC_FULFILLMENT_SERVER_ADDRESS" not in operator
+    assert "OSAC_FULFILLMENT_CLIENT_ID" not in operator
+    assert "OSAC_FULFILLMENT_CLIENT_SECRET" not in operator
+
+
 def check_trust_gate(enabled: bool) -> None:
     docs = render(enabled, csi=True)
     controller = select(docs, "osac/charts/service/templates/controller/deployment.yaml")
@@ -355,6 +375,7 @@ if __name__ == "__main__":
     check_production_default()
     check_custom_auth_credentials()
     check_profile_emergency_service_accounts()
+    check_operator_fulfillment_can_be_disabled()
     check_trust_gate(False)
     check_trust_gate(True)
     check_infra_ca_bundle_targets_csi()

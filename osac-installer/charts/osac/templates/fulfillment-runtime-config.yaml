@@ -1,7 +1,7 @@
 {{/*
 This ConfigMap bridges Helm-time service values to the operator's runtime
-environment. Endpoint and issuer are intentionally non-secret; CSI credentials
-remain in the separate credential Secret.
+environment. Endpoint, issuer, and Secret references are non-secret; credential
+values remain in separate Kubernetes Secrets.
 */}}
 {{- if .Values.csiDriver.enabled }}
 {{- $endpoint := .Values.global.fulfillment.endpoint }}
@@ -10,6 +10,8 @@ remain in the separate credential Secret.
 {{- $endpoint = printf "%s:443" $externalHostname }}
 {{- end }}
 {{- $issuer := tpl (required "service.auth.issuerUrl is required when csiDriver.enabled is true" .Values.service.auth.issuerUrl) . }}
+{{- $clientIDCredential := include "osac.fulfillmentAuthCredential" (list . "client-id") | fromJson }}
+{{- $clientSecretCredential := include "osac.fulfillmentAuthCredential" (list . "client-secret") | fromJson }}
 {{- $csiNamespace := .Values.csiDriver.namespace | default .Release.Namespace }}
 {{- $csiConfigMapName := required "csiDriver.controller.fulfillment.configMap.name is required when csiDriver.enabled is true" .Values.csiDriver.controller.fulfillment.configMap.name }}
 {{- $csiEndpointKey := required "csiDriver.controller.fulfillment.configMap.endpointKey is required when csiDriver.enabled is true" .Values.csiDriver.controller.fulfillment.configMap.endpointKey }}
@@ -27,9 +29,15 @@ kind: ConfigMap
 metadata:
   name: {{ $operatorConfigMapName }}
   namespace: {{ .Release.Namespace }}
+  labels:
+    osac.openshift.io/fulfillment-auth-config: "true"
 data:
   OSAC_FULFILLMENT_ENDPOINT: {{ $endpoint | quote }}
   OSAC_FULFILLMENT_ISSUER_URL: {{ $issuer | quote }}
+  OSAC_FULFILLMENT_CLIENT_ID_SECRET_NAME: {{ $clientIDCredential.name | quote }}
+  OSAC_FULFILLMENT_CLIENT_ID_SECRET_KEY: {{ $clientIDCredential.key | quote }}
+  OSAC_FULFILLMENT_CLIENT_SECRET_SECRET_NAME: {{ $clientSecretCredential.name | quote }}
+  OSAC_FULFILLMENT_CLIENT_SECRET_SECRET_KEY: {{ $clientSecretCredential.key | quote }}
 {{- end }}
 {{- if or (not .Values.operator.enabled) (ne $csiNamespace .Release.Namespace) (ne $csiConfigMapName $operatorConfigMapName) }}
 ---

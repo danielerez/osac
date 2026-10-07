@@ -367,6 +367,7 @@ ifeq ($(HELM_MAJOR),4)
 endif
 	# Helm install: operators + AWX + UI + seeding
 	helm upgrade --install osac-devstack charts/osac-devstack \
+		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
 		--namespace $(NS) --create-namespace \
 		--set osacNamespace=$(NS) \
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
@@ -577,12 +578,16 @@ fulfillment-trust-render-test: helm-deps ## Check verified fulfillment transport
 mce-render-test: ## Check disabled MCE defaults, explicit enablement, and CaaS inheritance
 	uv run --project .. python scripts/test-mce-render.py
 
+.PHONY: fulfillment-auth-test
+fulfillment-auth-test: ## Check Fulfillment service-account token exchange behavior
+	./scripts/test-fulfillment-auth.sh
+
 .PHONY: dev-full-render-test
 dev-full-render-test: helm-deps ## Check dev-full TLS and Helm post-rendering
 	./scripts/test-dev-full-render.sh
 
 .PHONY: helm-validate
-helm-validate: helm-lint csi-render-test helm-networking-test fulfillment-trust-render-test mce-render-test dev-full-render-test ## Validate all charts (lint + template)
+helm-validate: helm-lint csi-render-test helm-networking-test fulfillment-trust-render-test fulfillment-auth-test mce-render-test dev-full-render-test ## Validate all charts (lint + template)
 	@for d in values/*/; do \
 		infra="$${d}infra.yaml"; \
 		[ -f "$$infra" ] && echo "Validating $$infra..." && \

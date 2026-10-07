@@ -281,9 +281,12 @@ def resource(kind, name):
     return matches[0]
 
 job = resource('Job', 'create-network-class')
-env = {e['name']: e['value'] for c in job['spec']['template']['spec']['containers']
-       if c['name'] == 'create-network-class' for e in c['env']}
-body = json.loads(env['NETWORK_CLASS_BODY'])
+containers = [c for c in job['spec']['template']['spec']['containers']
+              if c['name'] == 'create-network-class']
+assert len(containers) == 1, f"expected one create-network-class container, got {len(containers)}"
+body_env = [e for e in containers[0]['env'] if e['name'] == 'NETWORK_CLASS_BODY']
+assert len(body_env) == 1 and 'value' in body_env[0], 'expected one literal NETWORK_CLASS_BODY env var'
+body = json.loads(body_env[0]['value'])
 assert body.get('fabric_manager') == 'cudn_net', 'default class must select CUDN'
 assert not body.get('k8s_manager'), 'default class must have no k8s manager'
 manager = resource('ConfigMap', 'osac-network-fabric-manager-cudn-net')

@@ -228,9 +228,19 @@ func (c *Client) DeleteTenant(ctx context.Context, tenantName string) error {
 	if err != nil {
 		return fmt.Errorf("failed to delete organization: %w", err)
 	}
-	defer response.Body.Close()
+	response.Body.Close()
 
-	return nil
+	// The tenant finalizer must remain until Keycloak no longer reports the
+	// organization; otherwise the Fulfillment tenant can disappear first.
+	if _, err := c.GetTenant(ctx, tenantName); err != nil {
+		var notFoundErr *ErrNotFound
+		if errors.As(err, &notFoundErr) {
+			return nil
+		}
+		return fmt.Errorf("failed to verify organization deletion: %w", err)
+	}
+
+	return fmt.Errorf("organization %q still exists after deletion", tenantName)
 }
 
 func (c *Client) AddUserToOrganization(ctx context.Context, tenantName string, userID string) error {

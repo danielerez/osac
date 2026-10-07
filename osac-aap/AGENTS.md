@@ -44,6 +44,8 @@ See [suite boundaries and coverage gaps](../docs/INTEGRATION-TESTING.md#osac-aap
 | Touched area | Required validation | Command / follow-up |
 |---|---|---|
 | Filters, variable transforms, and isolated plugin logic | Unit | `uv run pytest tests/unit` |
+| Keycloak token lookup, cache refresh, and error handling | Unit | `uv run pytest tests/unit/plugins/lookup/test_fulfillment_token.py` |
+| AAP publish-templates credential and Kubernetes token wiring | Unit | `uv run pytest tests/unit/test_publish_templates_auth_config.py` |
 | Template publishing certificate validation | Local protocol integration | Run the `test_cert_validation` play in `collections/ansible_collections/osac/service/roles/publish_templates/tests/test.yml` with `uv run ansible-playbook`; the mock HTTPS server tests the client transport only |
 | AgentlessNet VirtualNetwork/Subnet allocation, SQLite migration, parent locks, VLAN interfaces, switch discovery parsing, and derived DHCP-manager helpers | Unit | `tests/unit/test_agentless_network_state.py`, `tests/unit/test_agentless_net_network.py`, and `tests/unit/test_agentless_net_subnet.py`; run `uv run pytest tests/unit` |
 | AgentlessNet VN and Cumulus Subnet inventory, host registration, trunk validation, and password rejection | Contract | `agentless_net_stub` baseline target runs `files/validate_vn_inventory.yml` in fresh Ansible processes; omitted switch platform defaults to Cumulus and explicit unsupported platforms fail; no SSH/provider commands |

@@ -155,6 +155,14 @@ the certificate. The Kind
 `SUITE=fulfillment` target exercises deployed startup and API behavior, subject
 to the profile's configured CA and enabled services.
 
+### OSAC-6085 installer service-account authentication
+
+| Behavior | Tier and owner | Location and command | Boundary and limits |
+|---|---|---|---|
+| Client-credentials token exchange and sanitized failures | Unit, DEV OSAC-6085 | `make fulfillment-auth-test` from `osac-installer/` | Curl is stubbed; the test checks form encoding, TLS arguments, token parsing, and secret-safe diagnostics. It does not contact Keycloak or Fulfillment. |
+| Main-chart and dev-full hook wiring | Contract, DEV OSAC-6085 | `make fulfillment-trust-render-test` and `make dev-full-render-test` from `osac-installer/` | Helm renders the Jobs and scripts, checks Secret references and token-source wiring, and verifies CA mounts. It does not run the Jobs or exercise a live API. |
+| Deployed dev-full catalog and tenant hooks | Component integration gap, QE OSAC-4843 | No automated suite currently deploys `osac-devstack` and asserts both hooks complete with Keycloak-issued Fulfillment tokens. `make install-devstack PLATFORM=kind PROFILE=dev-full NS=osac` runs the hooks during local setup but does not assert the auth boundary. | Follow-up coverage is tracked by [OSAC-4843](https://redhat.atlassian.net/browse/OSAC-4843). |
+
 ### OSAC-5343 deployed enablement coverage
 
 The release E2E path adds these assertions to existing user journeys. The

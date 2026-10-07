@@ -8,6 +8,7 @@ import re
 import subprocess
 
 CHART = pathlib.Path(__file__).resolve().parents[1] / "charts/osac"
+VALUES = CHART.parents[1] / "values"
 HOOKS = {
     "fulfillment-create-hub",
     "create-network-class",
@@ -15,9 +16,20 @@ HOOKS = {
     "register-local-storage",
     "osac-publish-templates",
 }
+FULFILLMENT_AUTH_HOOKS = {
+    "fulfillment-create-hub": "osac/templates/hooks/create-hub.yaml",
+    "create-network-class": "osac/templates/hooks/create-network-class.yaml",
+    "seed-cluster-versions": "osac/templates/hooks/seed-cluster-versions.yaml",
+    "register-local-storage": "osac/templates/hooks/register-local-storage.yaml",
+}
 
 
-def render(enabled: bool | None = None, *, csi: bool = False) -> list[str]:
+def render(
+    enabled: bool | None = None,
+    *,
+    csi: bool = False,
+    custom_auth_credentials: bool = False,
+) -> list[str]:
     cmd = [
         "helm",
         "template",
@@ -38,6 +50,19 @@ def render(enabled: bool | None = None, *, csi: bool = False) -> list[str]:
         "--set",
         "aap.instanceGroups.publishTemplates.enabled=true",
     ]
+    if custom_auth_credentials:
+        cmd.extend(
+            (
+                "--set",
+                "service.auth.controllerCredentials[0].secret.name=custom-fulfillment-credentials",
+                "--set",
+                "service.auth.controllerCredentials[0].secret.items[0].key=custom-client-id",
+                "--set",
+                "service.auth.controllerCredentials[0].secret.items[1].key=custom-client-secret",
+                "--set",
+                "operator.fulfillment.configMap.name=custom-fulfillment-config",
+            )
+        )
     if enabled is not None:
         cmd.extend(("--set", f"global.fulfillmentTrust.enabled={str(enabled).lower()}"))
     if csi:
@@ -71,6 +96,39 @@ def check_main_container_tls(job: str, name: str) -> None:
     assert not re.search(r"\bcurl\b[^\n]*(?:-[A-Za-z]*k[A-Za-z]*|--insecure)(?:\s|$)", commands), name
 
 
+def check_fulfillment_auth(
+    job: str,
+    name: str,
+    *,
+    secret_name: str = "fulfillment-controller-credentials",
+    client_id_key: str = "client-id",
+    client_secret_key: str = "client-secret",
+) -> None:
+    commands = main_container_commands(job)
+    assert "get_fulfillment_access_token()" in commands, name
+    assert "AUTH_TOKEN=$(get_fulfillment_access_token)" in commands, name
+    assert "grant_type=client_credentials" in commands, name
+    assert "client_secret@${client_secret_file}" in commands, name
+    assert "printf '%s\\n' \"${access_token}\"" in commands, name
+    assert "Authorization: Bearer ${AUTH_TOKEN}" in commands, name
+    assert "/var/run/secrets/kubernetes.io/serviceaccount/token" not in commands, name
+    assert "name: FULFILLMENT_ISSUER_URL" in job, name
+    assert "valueFrom:\n            secretKeyRef:" in job, name
+    assert f'name: "{secret_name}"' in job, name
+    assert f'key: "{client_id_key}"' in job, name
+    assert f'secretName: "{secret_name}"' in job, name
+    assert f'key: "{client_secret_key}"' in job, name
+    assert "name: FULFILLMENT_CLIENT_SECRET_FILE" in job, name
+    assert "mountPath: /var/run/secrets/fulfillment-client-secret" in job, name
+    check_main_container_tls(job, name)
+
+    if name == "fulfillment-create-hub":
+        assert "serviceAccountName: admin" in job, name
+    else:
+        assert "automountServiceAccountToken: false" in job, name
+        assert "serviceAccountName: admin" not in job, name
+
+
 def check(enabled: bool) -> None:
     docs = render(enabled)
     operator = select(docs, "osac/charts/operator/templates/deployment.yaml")
@@ -102,6 +160,8 @@ def check(enabled: bool) -> None:
         assert not re.search(r"\bcurl\b[^\n]*(?:-[A-Za-z]*k[A-Za-z]*|--insecure)(?:\s|$)", job), name
         if name in {"create-network-class", "register-local-storage", "seed-cluster-versions"}:
             check_main_container_tls(job, name)
+    for name, source in FULFILLMENT_AUTH_HOOKS.items():
+        check_fulfillment_auth(select(docs, source, name), name)
 
 
 def check_production_default() -> None:
@@ -125,6 +185,105 @@ def check_production_default() -> None:
         job = select(docs, source, name)
         if name in {"create-network-class", "register-local-storage", "seed-cluster-versions"}:
             check_main_container_tls(job, name)
+
+
+def check_custom_auth_credentials() -> None:
+    docs = render(csi=True, custom_auth_credentials=True)
+    for name, source in FULFILLMENT_AUTH_HOOKS.items():
+        check_fulfillment_auth(
+            select(docs, source, name),
+            name,
+            secret_name="custom-fulfillment-credentials",
+            client_id_key="custom-client-id",
+            client_secret_key="custom-client-secret",
+        )
+    runtime_config = next(doc for doc in docs if "OSAC_FULFILLMENT_CLIENT_ID_SECRET_NAME" in doc)
+    assert "name: custom-fulfillment-config" in runtime_config
+    assert 'osac.openshift.io/fulfillment-auth-config: "true"' in runtime_config
+    assert 'OSAC_FULFILLMENT_CLIENT_ID_SECRET_NAME: "custom-fulfillment-credentials"' in runtime_config
+    assert 'OSAC_FULFILLMENT_CLIENT_ID_SECRET_KEY: "custom-client-id"' in runtime_config
+    assert 'OSAC_FULFILLMENT_CLIENT_SECRET_SECRET_NAME: "custom-fulfillment-credentials"' in runtime_config
+    assert 'OSAC_FULFILLMENT_CLIENT_SECRET_SECRET_KEY: "custom-client-secret"' in runtime_config
+
+
+def check_profile_emergency_service_accounts() -> None:
+    expected_profiles = {
+        "caas-ci/instance.yaml": {
+            "admin",
+            "osac-operator",
+            "osac-operator-controller-manager",
+            "template-publisher",
+            "osac-metering",
+        },
+        "vmaas-ci/instance.yaml": {
+            "admin",
+            "osac-operator",
+            "osac-operator-controller-manager",
+            "template-publisher",
+            "osac-metering",
+        },
+        "dev/instance.yaml": {
+            "admin",
+            "osac-operator",
+            "osac-operator-controller-manager",
+            "template-publisher",
+            "osac-metering",
+        },
+        "bmaas-ci/instance.yaml": {
+            "admin",
+            "osac-operator",
+            "osac-operator-controller-manager",
+            "template-publisher",
+            "osac-metering",
+        },
+        "cudn-evpn-netris-test/instance.yaml": {
+            "admin",
+            "osac-operator",
+            "osac-operator-controller-manager",
+            "template-publisher",
+            "osac-metering",
+        },
+        "dev/kind-instance.yaml": {
+            "admin",
+            "osac-operator",
+            "osac-operator-controller-manager",
+        },
+        "full-ci/instance.yaml": {
+            "admin",
+            "osac-operator",
+            "osac-operator-controller-manager",
+            "template-publisher",
+            "osac-metering",
+        },
+    }
+    for profile, expected_accounts in expected_profiles.items():
+        cmd = [
+            "helm",
+            "template",
+            "osac",
+            str(CHART),
+            "--values",
+            str(CHART / "ci/default-values.yaml"),
+            "--values",
+            str(VALUES / profile),
+            "--namespace",
+            "osac",
+            "--set",
+            "service.internalHostname=fulfillment-internal-api.test",
+            "--set",
+            "service.externalHostname=fulfillment.test",
+        ]
+        manifest = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+        docs = [doc for doc in manifest.split("\n---\n") if doc.strip()]
+        deployment = select(
+            docs,
+            "osac/charts/service/templates/grpc-server/deployment.yaml",
+        )
+        match = re.search(r"--emergency-service-accounts=([^\s]+)", deployment)
+        assert match, profile
+        accounts = set(match.group(1).split(","))
+        assert "admin" in accounts, profile
+        assert accounts == expected_accounts, profile
 
 
 def check_trust_gate(enabled: bool) -> None:
@@ -152,6 +311,8 @@ if __name__ == "__main__":
     check(False)
     check(True)
     check_production_default()
+    check_custom_auth_credentials()
+    check_profile_emergency_service_accounts()
     check_trust_gate(False)
     check_trust_gate(True)
     check_infra_ca_bundle_targets_csi()

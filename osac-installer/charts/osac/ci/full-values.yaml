@@ -55,6 +55,8 @@ service:
         items:
         - key: client-id
           param: client-id
+        - key: client-secret
+          param: client-secret
   idp:
     provider: keycloak
     url: https://keycloak.keycloak.svc.cluster.local

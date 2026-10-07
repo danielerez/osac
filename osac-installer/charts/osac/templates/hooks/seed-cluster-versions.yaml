@@ -22,7 +22,7 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
-      serviceAccountName: admin
+      automountServiceAccountToken: false
       initContainers:
       {{- include "osac.waitForFulfillment" . | nindent 6 }}
       containers:
@@ -34,7 +34,8 @@ spec:
           - pipefail
           - -c
           - |
-            AUTH_TOKEN=$(< /var/run/secrets/kubernetes.io/serviceaccount/token)
+            {{- include "osac.fulfillmentAccessTokenFunction" . | nindent 12 }}
+            AUTH_TOKEN=$(get_fulfillment_access_token)
             API="https://fulfillment-internal-api:8001/api/private/v1/cluster_versions"
 
             create_version() {
@@ -82,12 +83,14 @@ spec:
         env:
         - name: HOME
           value: /tmp
+        {{- include "osac.fulfillmentAuthEnv" . | nindent 8 }}
         volumeMounts:
         - name: tmp
           mountPath: /tmp
         - name: ca-bundle
           mountPath: /etc/ca-bundle
           readOnly: true
+        {{- include "osac.fulfillmentAuthVolumeMount" . | nindent 8 }}
         resources:
           requests:
             cpu: 50m
@@ -109,5 +112,6 @@ spec:
           items:
           - key: bundle.pem
             path: bundle.pem
+      {{- include "osac.fulfillmentAuthVolume" . | nindent 6 }}
       restartPolicy: OnFailure
 {{- end }}

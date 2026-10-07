@@ -6,6 +6,20 @@ kindClusterName: osac-dev
 # Build the custom multi-arch image with: make -C charts/osac-devstack build-cli-tools
 cliImage: quay.io/openshift/origin-cli:4.20.0  # TODO: Replace with ghcr.io/osac-project/cli-tools:latest after first build
 
+# Shared with the OSAC chart profile so devstack hooks use the same issuer and
+# credential Secret references as the main installer hooks.
+service:
+  auth:
+    issuerUrl: ""
+    controllerCredentials:
+      - secret:
+          name: fulfillment-controller-credentials
+          items:
+            - key: client-id
+              param: client-id
+            - key: client-secret
+              param: client-secret
+
 # --- KubeVirt/CDI/Multus ---
 virt:
   enabled: true

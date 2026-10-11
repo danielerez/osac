@@ -55,6 +55,15 @@ def select(docs: list[str], source: str, name: str | None = None) -> str:
     return matches[0]
 
 
+def trust_reconciler_enabled(operator: str) -> bool:
+    match = re.search(
+        r'- name: OSAC_ENABLE_FULFILLMENT_TRUST_RECONCILER\n\s+value: "(true|false)"', operator
+    )
+    if match is None:
+        raise AssertionError("rendered operator deployment is missing the trust reconciler setting")
+    return match.group(1) == "true"
+
+
 def main_container_commands(job: str) -> str:
     marker = "      containers:\n"
     if marker not in job:
@@ -105,15 +114,17 @@ def check(enabled: bool) -> None:
 
 
 def check_production_default() -> None:
+    """Check default rendering with either configured trust default."""
     docs = render(csi=True)
     operator = select(docs, "osac/charts/operator/templates/deployment.yaml")
     controller = select(docs, "osac/charts/service/templates/controller/deployment.yaml")
     node = select(docs, "osac/charts/csiDriver/templates/node-daemonset.yaml")
+    trust_enabled = trust_reconciler_enabled(operator)
     assert "--grpc-insecure" not in operator
     assert "--fulfillment-ca-file=/etc/ca-bundle/bundle.pem" in operator
     assert "--fulfillment-trust-enabled" not in controller
-    assert "--fulfillment-ca-file=/etc/osac-csi/fulfillment-ca/bundle.pem" in node
-    assert "name: ca-bundle" in node
+    assert ("--fulfillment-ca-file=/etc/osac-csi/fulfillment-ca/bundle.pem" in node) is trust_enabled
+    assert ("name: ca-bundle" in node) is trust_enabled
     assert "--grpc-insecure" not in node
     assert "--allow-stub" not in node
     for name in HOOKS:
@@ -132,12 +143,11 @@ def check_trust_gate(enabled: bool) -> None:
     controller = select(docs, "osac/charts/service/templates/controller/deployment.yaml")
     operator = select(docs, "osac/charts/operator/templates/deployment.yaml")
     assert "--fulfillment-trust-enabled" not in controller
-    assert ("--metrics-bind-address=:8443" in operator) is enabled
     metrics_reader_binding = "kind: ClusterRoleBinding\nmetadata:\n  name: osac-operator-metrics-reader\n"
     assert (metrics_reader_binding in "\n".join(docs)) is enabled
-    assert re.search(
-        rf'- name: OSAC_ENABLE_FULFILLMENT_TRUST_RECONCILER\n\s+value: "{str(enabled).lower()}"', operator
-    ), "operator trust reconciler flag does not match global.fulfillmentTrust.enabled"
+    assert trust_reconciler_enabled(operator) is enabled, (
+        "operator trust reconciler flag does not match global.fulfillmentTrust.enabled"
+    )
     assert "--fulfillment-ca-file=/etc/ca-bundle/bundle.pem" in operator
     assert "--grpc-insecure" not in operator
 

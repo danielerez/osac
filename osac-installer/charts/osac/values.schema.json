@@ -29,8 +29,8 @@
           "properties": {
             "enabled": {
               "type": "boolean",
-              "description": "Enable fulfillment trust synchronization for tenant-scoped ClusterOrders",
-              "default": true
+              "description": "Enable fulfillment trust synchronization for tenant-scoped ClusterOrders when tenant CSI trust support is deployed",
+              "default": false
             },
             "tenantNamespace": {
               "type": "string",

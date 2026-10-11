@@ -21,8 +21,8 @@ global:
     endpoint: ""
   fulfillmentTrust:
     # Enables trust reconciliation for tenant-scoped ClusterOrders.
-    # Development and CI profiles can override this until tenant trust support is installed.
-    enabled: true
+    # Enable only when tenant CSI trust support is deployed.
+    enabled: false
     tenantNamespace: osac-csi
   # --- Service Enablement ---
   # Controls which service tiers are active across all OSAC components.

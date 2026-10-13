@@ -255,7 +255,7 @@ def check_custom_auth_credentials() -> None:
             client_secret_key="custom-client-secret",
         )
     runtime_config = next(doc for doc in docs if "OSAC_FULFILLMENT_CLIENT_ID_SECRET_NAME" in doc)
-    assert "name: custom-fulfillment-config" in runtime_config
+    assert 'name: "custom-fulfillment-config"' in runtime_config
     assert 'osac.openshift.io/fulfillment-auth-config: "true"' in runtime_config
     assert 'OSAC_FULFILLMENT_CLIENT_ID_SECRET_NAME: "custom-fulfillment-credentials"' in runtime_config
     assert 'OSAC_FULFILLMENT_CLIENT_ID_SECRET_KEY: "custom-client-id"' in runtime_config
@@ -267,43 +267,35 @@ def check_profile_emergency_service_accounts() -> None:
     expected_profiles = {
         "caas-ci/instance.yaml": {
             "admin",
-            "osac-operator",
-            "osac-operator-controller-manager",
+            "template-publisher",
             "osac-metering",
         },
         "vmaas-ci/instance.yaml": {
             "admin",
-            "osac-operator",
-            "osac-operator-controller-manager",
+            "template-publisher",
             "osac-metering",
         },
         "dev/instance.yaml": {
             "admin",
-            "osac-operator",
-            "osac-operator-controller-manager",
+            "template-publisher",
             "osac-metering",
         },
         "bmaas-ci/instance.yaml": {
             "admin",
-            "osac-operator",
-            "osac-operator-controller-manager",
+            "template-publisher",
             "osac-metering",
         },
         "cudn-evpn-netris-test/instance.yaml": {
             "admin",
-            "osac-operator",
-            "osac-operator-controller-manager",
+            "template-publisher",
             "osac-metering",
         },
         "dev/kind-instance.yaml": {
             "admin",
-            "osac-operator",
-            "osac-operator-controller-manager",
         },
         "full-ci/instance.yaml": {
             "admin",
-            "osac-operator",
-            "osac-operator-controller-manager",
+            "template-publisher",
             "osac-metering",
         },
     }

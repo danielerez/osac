@@ -101,7 +101,13 @@ var _ = Describe("Service account creation", func() {
 		Expect(target).To(Equal(clientUUID))
 		Expect(strings.Contains(data, credential)).To(BeFalse())
 		var count int
-		Expect(testPool.QueryRow(ctx, `select count(*) from changes where "table"='service_accounts' and data::text like $1`, "%"+credential+"%").Scan(&count)).To(Succeed())
+		Expect(testPool.QueryRow(ctx, `
+			select count(*) from changes
+			where "table"='service_accounts' and data->>'id'=$1`, response.GetObject().GetId()).Scan(&count)).To(Succeed())
+		Expect(count).To(BeNumerically(">", 0))
+		Expect(testPool.QueryRow(ctx, `
+			select count(*) from changes
+			where "table"='service_accounts' and data::text like $1`, "%"+credential+"%").Scan(&count)).To(Succeed())
 		Expect(count).To(BeZero())
 		Expect(request.GetObject().GetStatus().GetClientId()).To(Equal("forged"), "input must remain unmodified")
 	})

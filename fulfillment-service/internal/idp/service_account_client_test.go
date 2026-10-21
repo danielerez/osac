@@ -121,7 +121,7 @@ var _ = Describe("Service-account Keycloak client", func() {
 		}
 		Expect(created).To(HaveKeyWithValue("serviceAccountsEnabled", true))
 		Expect(created).To(HaveKeyWithValue("clientAuthenticatorType", "client-secret"))
-		Expect(created).To(HaveKeyWithValue("defaultClientScopes", BeEmpty()))
+		Expect(created).To(HaveKeyWithValue("defaultClientScopes", ConsistOf("service_account")))
 		Expect(created).To(HaveKeyWithValue("optionalClientScopes", BeEmpty()))
 		Expect(mappers).To(ConsistOf(
 			HaveKeyWithValue("protocolMapper", "oidc-hardcoded-claim-mapper"),

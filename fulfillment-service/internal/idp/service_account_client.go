@@ -63,7 +63,7 @@ func (c *Client) CreateServiceAccountClient(ctx context.Context, clientID, tenan
 		"implicitFlowEnabled":       false,
 		"directAccessGrantsEnabled": false,
 		"fullScopeAllowed":          false,
-		"defaultClientScopes":       []string{},
+		"defaultClientScopes":       []string{"service_account"},
 		"optionalClientScopes":      []string{},
 	})
 	if requestErr != nil {

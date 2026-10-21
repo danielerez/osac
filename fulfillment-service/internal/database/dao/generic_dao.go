@@ -246,15 +246,19 @@ func (b *GenericDAOBuilder[O]) Build() (result *GenericDAO[O], err error) {
 	// Create the template that we will clone when we need to create a new metadata object:
 	metadataTemplate := objectTemplate.NewField(metadataField).Message()
 
-	// Create the JSON encoder. We need this special encoder in order to ignore the 'id' and 'metadata' fields
-	// because we save those in separate database columns and not in the JSON document where we save everything
-	// else.
+	// Metadata fields stored in columns are omitted directly during encoding.
+	ignoredFields := []any{idField.FullName()}
+	metadataFields := metadataTemplate.Descriptor().Fields()
+	for i := range metadataFields.Len() {
+		field := metadataFields.Get(i)
+		if field.Name() != "display_name" && field.Name() != "description" {
+			ignoredFields = append(ignoredFields, field.FullName())
+		}
+	}
 	jsonEncoder, err := json.NewEncoder().
 		SetLogger(b.logger).
-		AddIgnoredFields(
-			idField.FullName(),
-			metadataField.FullName(),
-		).
+		AddIgnoredFields(ignoredFields...).
+		AddOmitEmptyMessageFields(metadataField.FullName()).
 		Build()
 	if err != nil {
 		err = fmt.Errorf("failed to create JSON encoder: %w", err)

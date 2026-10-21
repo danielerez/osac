@@ -424,6 +424,25 @@ var _ = Describe("Event publisher", Ordered, func() {
 			Expect(events[0].event.GetProject().GetSpec().GetTitle()).To(Equal("Acme"))
 		})
 
+		It("Preserves descriptive metadata in service account events and trusts SQL ownership", func() {
+			tenant := "machines-" + uuid.New()
+			insertChange("service_accounts", tenant, "sa-1", fmt.Sprintf(`{
+				"id": "sa-1", "name": "robot", "tenant": %q,
+				"data": {"metadata":{"display_name":"Build robot","description":"Build jobs","tenant":"forged"},
+				         "status":{"client_id":"osac-sa-example"}}
+			}`, tenant))
+			cancel, done := startPublisher(pub)
+			defer stopPublisher(cancel, done)
+			events := collectKafkaEvents(client, DefaultEventTopicPrefix+tenant, 1)
+			account := events[0].event.GetServiceAccount()
+			Expect(account).ToNot(BeNil())
+			Expect(account.GetMetadata().GetDisplayName()).To(Equal("Build robot"))
+			Expect(account.GetMetadata().GetDescription()).To(Equal("Build jobs"))
+			Expect(account.GetMetadata().GetTenant()).To(Equal(tenant))
+			Expect(account.GetMetadata().GetName()).To(Equal("robot"))
+			Expect(account.GetStatus().GetClientId()).To(Equal("osac-sa-example"))
+		})
+
 		It("Publishes a worker's owner-reference attribution on the tenant's topic", func() {
 			tenant := "workers-" + uuid.New()
 			topic := DefaultEventTopicPrefix + tenant

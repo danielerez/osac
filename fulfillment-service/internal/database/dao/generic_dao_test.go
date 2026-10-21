@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
@@ -143,6 +144,48 @@ var _ = Describe("Generic DAO", func() {
 	})
 
 	Describe("Creation", func() {
+		It("preserves descriptive metadata through persistence and archival", func() {
+			generic, err := NewGenericDAO[*privatev1.ServiceAccount]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+			Expect(err).ToNot(HaveOccurred())
+			input := privatev1.ServiceAccount_builder{
+				Metadata: privatev1.Metadata_builder{Name: "robot", Tenant: "my-tenant", DisplayName: "Build robot", Description: "Initial purpose"}.Build(),
+			}.Build()
+			created, err := generic.Create().SetObject(input).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(input.GetId()).To(BeEmpty())
+			Expect(input.GetMetadata().GetName()).To(Equal("robot"))
+			Expect(input.GetMetadata().GetTenant()).To(Equal("my-tenant"))
+			Expect(created.GetObject().GetMetadata().GetDisplayName()).To(Equal("Build robot"))
+			Expect(created.GetObject().GetMetadata().GetDescription()).To(Equal("Initial purpose"))
+			var data []byte
+			Expect(tx.QueryRow(ctx, `select data from service_accounts where id=$1`, created.GetObject().GetId()).Scan(&data)).To(Succeed())
+			var stored map[string]any
+			Expect(json.Unmarshal(data, &stored)).To(Succeed())
+			storedMetadata := stored["metadata"].(map[string]any)
+			Expect(storedMetadata).To(HaveKeyWithValue("display_name", "Build robot"))
+			Expect(storedMetadata).To(HaveKeyWithValue("description", "Initial purpose"))
+			Expect(storedMetadata).NotTo(HaveKey("name"))
+			Expect(storedMetadata).NotTo(HaveKey("tenant"))
+			got, err := generic.Get().SetId(created.GetObject().GetId()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(got.GetObject().GetMetadata().GetDisplayName()).To(Equal("Build robot"))
+			got.GetObject().GetMetadata().SetDisplayName("Updated robot")
+			got.GetObject().GetMetadata().SetDescription("")
+			updated, err := generic.Update().SetObject(got.GetObject()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(updated.GetObject().GetMetadata().GetDisplayName()).To(Equal("Updated robot"))
+			Expect(updated.GetObject().GetMetadata().GetDescription()).To(BeEmpty())
+			list, err := generic.List().Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(list.GetItems()).To(HaveLen(1))
+			Expect(list.GetItems()[0].GetMetadata().GetDisplayName()).To(Equal("Updated robot"))
+			_, err = generic.Delete().SetId(created.GetObject().GetId()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			var displayName string
+			Expect(tx.QueryRow(ctx, `select data->'metadata'->>'display_name' from archived_service_accounts where id=$1`, created.GetObject().GetId()).Scan(&displayName)).To(Succeed())
+			Expect(displayName).To(Equal("Updated robot"))
+		})
+
 		It("Can be built if all the required parameters are set", func() {
 			generic, err := NewGenericDAO[*testsv1.Object]().
 				SetLogger(logger).
@@ -1398,7 +1441,8 @@ var _ = Describe("Generic DAO", func() {
 			Expect(updated.GetId()).To(Equal(created.GetId()))
 			Expect(updated.GetMyString()).To(Equal("my_value"))
 			Expect(updated.GetMetadata()).ToNot(BeNil())
-			Expect(updated.GetMetadata().GetCreationTimestamp()).To(Equal(created.GetMetadata().GetCreationTimestamp()))
+			Expect(proto.Equal(updated.GetMetadata().GetCreationTimestamp(),
+				created.GetMetadata().GetCreationTimestamp())).To(BeTrue())
 		})
 
 		It("Updates labels", func() {

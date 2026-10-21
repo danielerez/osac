@@ -57,6 +57,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/role"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/rolebinding"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/securitygroup"
+	"github.com/osac-project/osac/fulfillment-service/internal/controllers/serviceaccount"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/subnet"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/tenant"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/user"
@@ -205,6 +206,8 @@ type runnerContext struct {
 	}
 	client *grpc.ClientConn
 }
+
+const serviceAccountEventFilter = "has(event.service_account)"
 
 const fabricDomainEventFilter = "has(event.fabric_domain) || (has(event.virtual_network) && event.type == EVENT_TYPE_OBJECT_UPDATED && ((has(event.virtual_network.status) && event.virtual_network.status.hub != '') || (has(event.virtual_network.metadata) && has(event.virtual_network.metadata.deletion_timestamp))))"
 
@@ -1033,6 +1036,44 @@ func (r *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 			r.logger.InfoContext(
 				ctx,
 				"Role binding reconciler failed",
+				slog.Any("error", err),
+			)
+		}
+	}()
+
+	// Create the service account reconciler:
+	r.logger.InfoContext(ctx, "Creating service account reconciler")
+	serviceAccountReconcilerFunction, err := serviceaccount.NewFunction().
+		SetLogger(r.logger).
+		SetConnection(r.client).
+		SetIdpClient(idpClient).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create service account reconciler function: %w", err)
+	}
+	serviceAccountReconciler, err := controllers.NewReconciler[*privatev1.ServiceAccount]().
+		SetSync(r.args.sync).
+		SetLogger(r.logger).
+		SetName("service-account").
+		SetClient(r.client).
+		SetFunction(serviceAccountReconcilerFunction.Run).
+		SetEventFilter(serviceAccountEventFilter).
+		SetHealthReporter(healthAggregator).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create service account reconciler: %w", err)
+	}
+
+	// Start the service account reconciler:
+	r.logger.InfoContext(ctx, "Starting service account reconciler")
+	go func() {
+		err := serviceAccountReconciler.Start(ctx)
+		if err == nil || errors.Is(err, context.Canceled) {
+			r.logger.InfoContext(ctx, "Service account reconciler finished")
+		} else {
+			r.logger.InfoContext(
+				ctx,
+				"Service account reconciler failed",
 				slog.Any("error", err),
 			)
 		}

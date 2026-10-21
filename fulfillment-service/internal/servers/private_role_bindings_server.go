@@ -16,7 +16,6 @@ package servers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -176,15 +175,16 @@ func (s *PrivateRoleBindingsServer) validateHumanRole(ctx context.Context, _, ca
 	if key == "" {
 		return nil
 	}
-	// Listing preserves the existing behavior for unresolved role references.
-	response, err := s.roles.List().SetFilter(fmt.Sprintf("this.id == %q", key)).SetLimit(1).Do(ctx)
+	response, err := s.roles.Get().SetId(key).Do(ctx)
 	if err != nil {
+		// Preserve the existing behavior for unresolved role references.
+		if _, ok := errors.AsType[*dao.ErrNotFound](err); ok {
+			return nil
+		}
 		return err
 	}
-	for _, role := range response.GetItems() {
-		if serviceaccounts.IsMachineOnlyRole(role.GetMetadata().GetName()) {
-			return status.Error(codes.InvalidArgument, "machine-only roles cannot be assigned to human users")
-		}
+	if serviceaccounts.IsMachineOnlyRole(response.GetObject().GetMetadata().GetName()) {
+		return status.Error(codes.InvalidArgument, "machine-only roles cannot be assigned to human users")
 	}
 	return nil
 }

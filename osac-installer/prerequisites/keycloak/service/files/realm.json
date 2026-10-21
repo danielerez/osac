@@ -742,7 +742,9 @@
           "view-realm",
           "view-users",
           "manage-identity-providers",
-          "view-identity-providers"
+          "view-identity-providers",
+          "create-client",
+          "manage-clients"
         ]
       },
       "notBefore": 0,

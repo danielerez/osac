@@ -38,6 +38,7 @@ import (
 	crlog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
+	"github.com/osac-project/osac/fulfillment-service/internal/cmd/service/start/idpclient"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/autoexternalipattachment"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/baremetalinstance"
@@ -239,12 +240,6 @@ func (r *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 	}
 	if r.args.authClientSecret != "" && r.args.authClientSecretFile != "" {
 		return fmt.Errorf("flags '--auth-client-secret' and '--auth-client-secret-file' are mutually exclusive")
-	}
-	if r.args.idpClientId != "" && r.args.idpClientIdFile != "" {
-		return fmt.Errorf("flags '--idp-client-id' and '--idp-client-id-file' are mutually exclusive")
-	}
-	if r.args.idpClientSecret != "" && r.args.idpClientSecretFile != "" {
-		return fmt.Errorf("flags '--idp-client-secret' and '--idp-client-secret-file' are mutually exclusive")
 	}
 	if r.args.authIssuerUrl == "" && r.args.authIssuerUrlFile == "" {
 		return fmt.Errorf("flag '--auth-issuer-url' or '--auth-issuer-url-file' is required")
@@ -1468,43 +1463,6 @@ func (r *runnerContext) createTokenSource(ctx context.Context, caPool *trust.Cer
 
 // createIDPClient creates the IDP client. The IDP URL and credentials are mandatory.
 func (r *runnerContext) createIDPClient(ctx context.Context, caPool *trust.CertPool) (*idp.Client, error) {
-	if r.args.idpURL == "" {
-		return nil, fmt.Errorf("flag '--idp-url' is required")
-	}
-	if r.args.idpClientId == "" && r.args.idpClientIdFile == "" {
-		return nil, fmt.Errorf("flag '--idp-client-id' or '--idp-client-id-file' is required")
-	}
-	if r.args.idpClientSecret == "" && r.args.idpClientSecretFile == "" {
-		return nil, fmt.Errorf("flag '--idp-client-secret' or '--idp-client-secret-file' is required")
-	}
-
-	// Get the client ID
-	idpClientId := r.args.idpClientId
-	if idpClientId == "" && r.args.idpClientIdFile != "" {
-		var err error
-		idpClientId, err = r.readTrimmedFile(r.args.idpClientIdFile)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to read IDP client identifier from file '%s': %w",
-				r.args.idpClientIdFile, err,
-			)
-		}
-	}
-
-	// Get the client secret
-	idpClientSecret := r.args.idpClientSecret
-	if idpClientSecret == "" && r.args.idpClientSecretFile != "" {
-		var err error
-		idpClientSecret, err = r.readTrimmedFile(r.args.idpClientSecretFile)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to read IDP client secret from file '%s': %w",
-				r.args.idpClientSecretFile, err,
-			)
-		}
-	}
-
-	// Get the issuer URL (same as auth issuer URL)
 	issuerUrl := r.args.authIssuerUrl
 	if issuerUrl == "" && r.args.authIssuerUrlFile != "" {
 		var err error
@@ -1517,52 +1475,16 @@ func (r *runnerContext) createIDPClient(ctx context.Context, caPool *trust.CertP
 		}
 	}
 
-	r.logger.DebugContext(
-		ctx,
-		"IDP credentials from flags",
-		slog.String("issuer_url", issuerUrl),
-		slog.String("!client_id", idpClientId),
-		slog.String("!client_secret", idpClientSecret),
-	)
-
-	// Create a token store that saves the token in memory
-	idpTokenStore, err := auth.NewMemoryTokenStore().
-		SetLogger(r.logger).
-		Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create IDP token store: %w", err)
-	}
-
-	// Create OAuth token source for IDP authentication
-	r.logger.InfoContext(ctx, "Creating IDP token source")
-	idpTokenSource, err := oauth.NewTokenSource().
-		SetLogger(r.logger).
-		SetStore(idpTokenStore).
-		SetCaPool(caPool).
-		SetIssuer(issuerUrl).
-		SetFlow(oauth.CredentialsFlow).
-		SetClientId(idpClientId).
-		SetClientSecret(idpClientSecret).
-		Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create IDP token source: %w", err)
-	}
-
-	// Create Keycloak IDP client:
-	r.logger.InfoContext(ctx, "Creating Keycloak IDP client")
-
-	idpClient, err := idp.NewClient().
-		SetLogger(r.logger).
-		SetBaseURL(r.args.idpURL).
-		SetTokenSource(idpTokenSource).
-		SetCaPool(caPool).
-		Build()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Keycloak client: %w", err)
-	}
-
-	r.logger.InfoContext(ctx, "Keycloak IDP client created successfully")
-	return idpClient, nil
+	return idpclient.New(ctx, idpclient.Config{
+		Logger:           r.logger,
+		BaseURL:          r.args.idpURL,
+		IssuerURL:        issuerUrl,
+		ClientID:         r.args.idpClientId,
+		ClientIDFile:     r.args.idpClientIdFile,
+		ClientSecret:     r.args.idpClientSecret,
+		ClientSecretFile: r.args.idpClientSecretFile,
+		CAPool:           caPool,
+	})
 }
 
 // readTrimmedFile reads the content of the given file and returns it with all leading and trailing whitespace removed.

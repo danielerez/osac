@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/osac-project/osac/fulfillment-service/internal/serviceaccounts"
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
@@ -63,6 +64,18 @@ var _ = Describe("Service-account infrastructure", Serial, func() {
 		id := account.GetId()
 		secret := response.GetClientSecret()
 		DeferCleanup(func(ctx context.Context) { deleteServiceAccount(ctx, api, id) })
+		secrets := publicv1.NewSecretsClient(conn)
+		createdSecret, err := secrets.Create(ctx, publicv1.SecretsCreateRequest_builder{Object: publicv1.Secret_builder{
+			Metadata: publicv1.Metadata_builder{Name: serviceaccounts.RegistrationSecretName(id)}.Build(),
+			Data:     map[string][]byte{"value": []byte("must-not-overwrite-internal-credential")},
+		}.Build()}.Build())
+		if err == nil {
+			DeferCleanup(func(ctx context.Context) {
+				_, deleteErr := secrets.Delete(ctx, publicv1.SecretsDeleteRequest_builder{Id: createdSecret.GetObject().GetId()}.Build())
+				Expect(deleteErr).ToNot(HaveOccurred())
+			})
+		}
+		Expect(status.Code(err)).To(Equal(codes.InvalidArgument))
 		Expect(secret).ToNot(BeEmpty())
 		Expect(account.GetMetadata().GetTenant()).To(Equal(tenant))
 		clientID := account.GetStatus().GetClientId()

@@ -145,7 +145,11 @@ var _ = Describe("Generic DAO", func() {
 
 	Describe("Creation", func() {
 		It("preserves descriptive metadata through persistence and archival", func() {
-			generic, err := NewGenericDAO[*privatev1.ServiceAccount]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+			generic, err := NewGenericDAO[*privatev1.ServiceAccount]().
+				SetLogger(logger).
+				SetTenancyLogic(tenancy).
+				SetPersistNonColumnMetadataFields().
+				Build()
 			Expect(err).ToNot(HaveOccurred())
 			input := privatev1.ServiceAccount_builder{
 				Metadata: privatev1.Metadata_builder{Name: "robot", Tenant: "my-tenant", DisplayName: "Build robot", Description: "Initial purpose"}.Build(),
@@ -184,6 +188,36 @@ var _ = Describe("Generic DAO", func() {
 			var displayName string
 			Expect(tx.QueryRow(ctx, `select data->'metadata'->>'display_name' from archived_service_accounts where id=$1`, created.GetObject().GetId()).Scan(&displayName)).To(Succeed())
 			Expect(displayName).To(Equal("Updated robot"))
+		})
+
+		It("does not persist descriptive metadata unless configured", func() {
+			generic, err := NewGenericDAO[*privatev1.ServiceAccount]().
+				SetLogger(logger).
+				SetTenancyLogic(tenancy).
+				Build()
+			Expect(err).ToNot(HaveOccurred())
+			created, err := generic.Create().SetObject(privatev1.ServiceAccount_builder{
+				Metadata: privatev1.Metadata_builder{
+					Name:        "robot-without-metadata-opt-in",
+					Tenant:      "my-tenant",
+					DisplayName: "Build robot",
+					Description: "Initial purpose",
+				}.Build(),
+			}.Build()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			var data []byte
+			Expect(tx.QueryRow(ctx, `select data from service_accounts where id=$1`, created.GetObject().GetId()).Scan(&data)).To(Succeed())
+			var stored map[string]any
+			Expect(json.Unmarshal(data, &stored)).To(Succeed())
+			if metadata, ok := stored["metadata"].(map[string]any); ok {
+				Expect(metadata).NotTo(HaveKey("display_name"))
+				Expect(metadata).NotTo(HaveKey("description"))
+			}
+
+			got, err := generic.Get().SetId(created.GetObject().GetId()).Do(ctx)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(got.GetObject().GetMetadata().GetDisplayName()).To(BeEmpty())
+			Expect(got.GetObject().GetMetadata().GetDescription()).To(BeEmpty())
 		})
 
 		It("Can be built if all the required parameters are set", func() {

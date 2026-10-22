@@ -306,6 +306,21 @@ func (r *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 	if err != nil {
 		return err
 	}
+	tenantTokenSource, err := vault.NewServiceTenantTokenSourceFromConfig(r.logger, r.args.vaultBase, vaultCaPool)
+	if err != nil {
+		return fmt.Errorf("failed to create service tenant token source: %w", err)
+	}
+	secretStore, err := vault.NewVaultSecretStore().
+		SetLogger(r.logger).
+		SetAddress(r.args.vaultBase.Endpoint).
+		SetTokenSource(tenantTokenSource).
+		SetParentNamespace(r.args.vaultBase.Namespace).
+		SetKVMountPath(r.args.vaultBase.KVMountPath).
+		SetCaPool(vaultCaPool).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to create vault secret store: %w", err)
+	}
 
 	// Create the token source:
 	r.logger.InfoContext(ctx, "Creating token source")
@@ -1042,6 +1057,7 @@ func (r *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 		SetLogger(r.logger).
 		SetConnection(r.client).
 		SetIdpClient(idpClient).
+		SetSecretStore(secretStore).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to create service account reconciler function: %w", err)

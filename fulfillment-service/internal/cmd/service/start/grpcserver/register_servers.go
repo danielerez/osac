@@ -732,6 +732,7 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 		SetTenancyLogic(deps.TenancyLogic).
 		SetMetricsRegisterer(deps.MetricsRegisterer).
 		SetIdpClient(deps.IdpClient).
+		SetSecretStore(deps.SecretStore).
 		Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service accounts server: %w", err)
@@ -744,6 +745,7 @@ func RegisterResourceServers(ctx context.Context, registrar grpc.ServiceRegistra
 		SetTenancyLogic(deps.TenancyLogic).
 		SetMetricsRegisterer(deps.MetricsRegisterer).
 		SetIdpClient(deps.IdpClient).
+		SetSecretStore(deps.SecretStore).
 		Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create private service accounts server: %w", err)

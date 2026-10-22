@@ -38,6 +38,7 @@ import (
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/idp"
+	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
@@ -48,6 +49,7 @@ type PrivateServiceAccountsServerBuilder struct {
 	tenancyLogic      auth.TenancyLogic
 	metricsRegisterer prometheus.Registerer
 	idpClient         idp.ClientInterface
+	secretStore       vault.SecretStore
 	filterDesc        protoreflect.MessageDescriptor
 }
 
@@ -60,10 +62,11 @@ const serviceAccountIDPTimeout = 30 * time.Second
 type PrivateServiceAccountsServer struct {
 	privatev1.UnimplementedServiceAccountsServer
 
-	logger    *slog.Logger
-	generic   *GenericServer[*privatev1.ServiceAccount]
-	idpClient idp.ClientInterface
-	roles     *dao.GenericDAO[*privatev1.Role]
+	logger      *slog.Logger
+	generic     *GenericServer[*privatev1.ServiceAccount]
+	idpClient   idp.ClientInterface
+	secretStore vault.SecretStore
+	roles       *dao.GenericDAO[*privatev1.Role]
 }
 
 // NewPrivateServiceAccountsServer creates a new builder for the private service accounts server.
@@ -108,6 +111,11 @@ func (b *PrivateServiceAccountsServerBuilder) SetIdpClient(value idp.ClientInter
 	return b
 }
 
+func (b *PrivateServiceAccountsServerBuilder) SetSecretStore(value vault.SecretStore) *PrivateServiceAccountsServerBuilder {
+	b.secretStore = value
+	return b
+}
+
 // Build creates the private service accounts server from the builder configuration.
 func (b *PrivateServiceAccountsServerBuilder) Build() (result *PrivateServiceAccountsServer, err error) {
 	if b.logger == nil {
@@ -117,6 +125,9 @@ func (b *PrivateServiceAccountsServerBuilder) Build() (result *PrivateServiceAcc
 	if b.idpClient == nil {
 		return nil, errors.New("IDP client is mandatory")
 	}
+	if b.secretStore == nil {
+		return nil, errors.New("secret store is mandatory")
+	}
 	if b.tenancyLogic == nil {
 		err = errors.New("tenancy logic is mandatory")
 		return
@@ -125,6 +136,7 @@ func (b *PrivateServiceAccountsServerBuilder) Build() (result *PrivateServiceAcc
 	generic, err := NewGenericServer[*privatev1.ServiceAccount]().
 		SetLogger(b.logger).
 		SetService(privatev1.ServiceAccounts_ServiceDesc.ServiceName).
+		SetPersistNonColumnMetadataFields().
 		SetAttributionLogic(b.attributionLogic).
 		SetTenancyLogic(b.tenancyLogic).
 		SetMetricsRegisterer(b.metricsRegisterer).
@@ -139,7 +151,7 @@ func (b *PrivateServiceAccountsServerBuilder) Build() (result *PrivateServiceAcc
 		return nil, err
 	}
 	result = &PrivateServiceAccountsServer{
-		idpClient: b.idpClient, roles: roles,
+		idpClient: b.idpClient, secretStore: b.secretStore, roles: roles,
 		logger:  b.logger,
 		generic: generic,
 	}
@@ -191,23 +203,35 @@ func (s *PrivateServiceAccountsServer) Create(ctx context.Context,
 	clientID := serviceaccounts.ClientID(tenant, account.GetId())
 	s.logger.InfoContext(ctx, "Creating service-account client", "tenant", tenant, "account_id", account.GetId(), "client_id", clientID)
 	idpCtx := ctx
-	var clientUUID string
+	var clientUUID, registrationToken string
+	secretStoreAttempted := false
 	defer func() {
 		if err != nil {
 			response = nil
-			if clientUUID != "" {
-				s.compensateClient(idpCtx, clientUUID, clientID)
+			if registrationToken != "" {
+				s.compensateClient(idpCtx, clientID, clientUUID, registrationToken, tenant,
+					serviceaccounts.RegistrationSecretName(account.GetId()), secretStoreAttempted)
 			}
 		}
 	}()
 	setupCtx, cancel := context.WithTimeout(idpCtx, serviceAccountIDPTimeout)
-	clientUUID, secret, setupErr := s.idpClient.CreateServiceAccountClient(setupCtx, clientID, tenant)
-	cancel()
+	clientUUID, secret, scopedToken, setupErr := s.idpClient.CreateServiceAccountClient(setupCtx, clientID, tenant)
+	registrationToken = scopedToken
 	if setupErr != nil {
+		cancel()
 		return nil, status.Error(codes.Unavailable, "failed to configure service-account client")
 	}
-	if _, parseErr := uuid.Parse(clientUUID); parseErr != nil || secret == "" {
+	if _, parseErr := uuid.Parse(clientUUID); parseErr != nil || secret == "" || registrationToken == "" {
+		cancel()
 		return nil, status.Error(codes.Unavailable, "invalid service-account client setup result")
+	}
+	secretStoreAttempted = true
+	storeErr := s.secretStore.Store(setupCtx, tenant, "", serviceaccounts.RegistrationSecretName(account.GetId()), map[string][]byte{
+		serviceaccounts.RegistrationAccessTokenKey: []byte(registrationToken),
+	})
+	cancel()
+	if storeErr != nil {
+		return nil, status.Error(codes.Unavailable, "failed to store service-account management credential")
 	}
 	account.SetStatus(privatev1.ServiceAccountStatus_builder{ClientId: clientID, KeycloakClientUuid: clientUUID}.Build())
 
@@ -274,14 +298,16 @@ func (s *PrivateServiceAccountsServer) prepareCreate(ctx context.Context, _, acc
 	return s.validateRoles(ctx, account)
 }
 
-func (s *PrivateServiceAccountsServer) compensateClient(ctx context.Context, clientUUID, clientID string) {
+func (s *PrivateServiceAccountsServer) compensateClient(ctx context.Context, clientID, clientUUID, registrationToken, tenant, secretName string, deleteSecret bool) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := s.idpClient.DisableServiceAccountClient(cleanupCtx, clientUUID); err != nil {
-		s.logger.ErrorContext(cleanupCtx, "Failed to disable service-account client during compensation", "client_id", clientID)
-	}
-	if err := s.idpClient.DeleteServiceAccountClient(cleanupCtx, clientUUID); err != nil {
+	if err := s.idpClient.DeleteServiceAccountClient(cleanupCtx, clientID, clientUUID, registrationToken); err != nil {
 		s.logger.ErrorContext(cleanupCtx, "Failed to delete service-account client during compensation", "client_id", clientID)
+	}
+	if deleteSecret {
+		if err := s.secretStore.Delete(cleanupCtx, tenant, "", secretName); err != nil {
+			s.logger.ErrorContext(cleanupCtx, "Failed to delete service-account management credential during compensation", "client_id", clientID)
+		}
 	}
 }
 

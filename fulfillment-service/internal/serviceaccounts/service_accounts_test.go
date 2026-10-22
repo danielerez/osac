@@ -29,6 +29,14 @@ var _ = Describe("Service account identity", func() {
 			"osac-sa-tenant-a-d3c4e3db-95b8-481d-8b5c-963da477da12"))
 		Expect(serviceaccounts.ClientID(strings.Repeat("t", 63), "d3c4e3db-95b8-481d-8b5c-963da477da12")).To(HaveLen(108))
 	})
+	It("uses a stable Vault entry name for the scoped Keycloak token", func() {
+		accountID := "d3c4e3db-95b8-481d-8b5c-963da477da12"
+		name := serviceaccounts.RegistrationSecretName(accountID)
+		Expect(name).To(Equal("osac-internal-sa-" + accountID))
+		Expect(serviceaccounts.IsRegistrationSecretName(name)).To(BeTrue())
+		Expect(serviceaccounts.IsRegistrationSecretName("osac-internal-sa-user-data")).To(BeFalse())
+		Expect(serviceaccounts.RegistrationAccessTokenKey).To(Equal("registration_access_token"))
+	})
 	DescribeTable("limits stored grants to the supported catalog", func(name string, assignable, machineOnly bool) {
 		Expect(serviceaccounts.IsAssignableRole(name)).To(Equal(assignable))
 		Expect(serviceaccounts.IsMachineOnlyRole(name)).To(Equal(machineOnly))

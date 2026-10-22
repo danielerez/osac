@@ -9,7 +9,29 @@ License. You may obtain a copy of the License at
 
 package serviceaccounts
 
+import (
+	"strings"
+
+	"github.com/google/uuid"
+)
+
+const RegistrationAccessTokenKey = "registration_access_token"
+const registrationSecretPrefix = "osac-internal-sa-"
+
 // ClientID derives an immutable client identifier from validated tenant and account identities.
 func ClientID(tenantID, accountID string) string {
 	return "osac-sa-" + tenantID + "-" + accountID
+}
+
+func RegistrationSecretName(accountID string) string {
+	return registrationSecretPrefix + accountID
+}
+
+func IsRegistrationSecretName(name string) bool {
+	accountID, ok := strings.CutPrefix(name, registrationSecretPrefix)
+	if !ok {
+		return false
+	}
+	_, err := uuid.Parse(accountID)
+	return err == nil
 }

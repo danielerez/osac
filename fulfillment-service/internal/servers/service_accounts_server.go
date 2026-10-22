@@ -24,6 +24,7 @@ import (
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/idp"
+	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
@@ -35,6 +36,7 @@ type ServiceAccountsServerBuilder struct {
 	tenancyLogic      auth.TenancyLogic
 	metricsRegisterer prometheus.Registerer
 	idpClient         idp.ClientInterface
+	secretStore       vault.SecretStore
 }
 
 var _ publicv1.ServiceAccountsServer = (*ServiceAccountsServer)(nil)
@@ -84,6 +86,11 @@ func (b *ServiceAccountsServerBuilder) SetIdpClient(value idp.ClientInterface) *
 	return b
 }
 
+func (b *ServiceAccountsServerBuilder) SetSecretStore(value vault.SecretStore) *ServiceAccountsServerBuilder {
+	b.secretStore = value
+	return b
+}
+
 // Build creates the public service accounts server from the builder configuration.
 func (b *ServiceAccountsServerBuilder) Build() (result *ServiceAccountsServer, err error) {
 	if b.logger == nil {
@@ -92,6 +99,9 @@ func (b *ServiceAccountsServerBuilder) Build() (result *ServiceAccountsServer, e
 	}
 	if b.idpClient == nil {
 		return nil, errors.New("IDP client is mandatory")
+	}
+	if b.secretStore == nil {
+		return nil, errors.New("secret store is mandatory")
 	}
 	if b.tenancyLogic == nil {
 		err = errors.New("tenancy logic is mandatory")
@@ -116,6 +126,7 @@ func (b *ServiceAccountsServerBuilder) Build() (result *ServiceAccountsServer, e
 
 	delegate, err := NewPrivateServiceAccountsServer().
 		SetIdpClient(b.idpClient).
+		SetSecretStore(b.secretStore).
 		SetLogger(b.logger).
 		SetAttributionLogic(b.attributionLogic).
 		SetTenancyLogic(b.tenancyLogic).

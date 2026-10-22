@@ -19,6 +19,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -35,25 +36,28 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/logging"
 	"github.com/osac-project/osac/fulfillment-service/internal/oauth"
 	"github.com/osac-project/osac/fulfillment-service/internal/servers"
+	"github.com/osac-project/osac/fulfillment-service/internal/serviceaccounts"
 	testutils "github.com/osac-project/osac/fulfillment-service/internal/testing"
 	"github.com/osac-project/osac/fulfillment-service/internal/tlsconfig"
 	"github.com/osac-project/osac/fulfillment-service/internal/uuid"
 	"github.com/osac-project/osac/fulfillment-service/internal/validation"
+	"github.com/osac-project/osac/fulfillment-service/internal/vault"
 	privatev1 "github.com/osac-project/osac/proto/gen/osac/private/v1"
 )
 
-// Only the mapper response is injected; client creation, credentials, enablement and cleanup use real Keycloak.
+// Service-account registration and cleanup use real Keycloak; failures are injected at the DCR boundary.
 type serviceAccountFaultTransport struct {
-	base       http.RoundTripper
-	failMapper bool
-	failDelete bool
-	mu         sync.Mutex
-	clientID   string
-	secret     string
+	base                    http.RoundTripper
+	failRegistration        bool
+	failDelete              bool
+	mu                      sync.Mutex
+	clientID                string
+	secret                  string
+	registrationAccessToken string
 }
 
 func (t *serviceAccountFaultTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/clients") {
+	if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/clients-registrations/default") {
 		data, err := io.ReadAll(request.Body)
 		if err != nil {
 			return nil, err
@@ -68,18 +72,21 @@ func (t *serviceAccountFaultTransport) RoundTrip(request *http.Request) (*http.R
 		}
 		t.mu.Lock()
 		t.clientID = client.ClientID
+		fail := t.failRegistration
+		t.failRegistration = false
 		t.mu.Unlock()
+		if fail {
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("injected registration outage")), Request: request}, nil
+		}
 	}
-	if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/protocol-mappers/add-models") && t.failMapper {
-		t.failMapper = false
-		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("injected mapper outage")), Request: request}, nil
-	}
-	if request.Method == http.MethodDelete && strings.Contains(request.URL.Path, "/clients/") && t.failDelete {
+	if request.Method == http.MethodDelete && strings.Contains(request.URL.Path, "/clients-registrations/default/") && t.failDelete {
+		t.mu.Lock()
 		t.failDelete = false
+		t.mu.Unlock()
 		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("injected cleanup outage")), Request: request}, nil
 	}
 	response, err := t.base.RoundTrip(request)
-	if err == nil && request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/client-secret") && response.StatusCode == http.StatusOK {
+	if err == nil && request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/clients-registrations/default") && response.StatusCode == http.StatusCreated {
 		data, readErr := io.ReadAll(response.Body)
 		_ = response.Body.Close()
 		if readErr != nil {
@@ -87,13 +94,15 @@ func (t *serviceAccountFaultTransport) RoundTrip(request *http.Request) (*http.R
 		}
 		response.Body = io.NopCloser(bytes.NewReader(data))
 		var value struct {
-			Value string `json:"value"`
+			Secret                  string `json:"secret"`
+			RegistrationAccessToken string `json:"registrationAccessToken"`
 		}
 		if err = json.Unmarshal(data, &value); err != nil {
 			return nil, err
 		}
 		t.mu.Lock()
-		t.secret = value.Value
+		t.secret = value.Secret
+		t.registrationAccessToken = value.RegistrationAccessToken
 		t.mu.Unlock()
 	}
 	return response, err
@@ -102,6 +111,8 @@ func (t *serviceAccountFaultTransport) RoundTrip(request *http.Request) (*http.R
 var _ = Describe("Service-account infrastructure failure boundaries", Serial, func() {
 	DescribeTable("keeps failed Create credentials off the wire and out of storage", func(ctx context.Context, mode string) {
 		lateCommit := mode == "commit"
+		ctrl := gomock.NewController(GinkgoT())
+		DeferCleanup(ctrl.Finish)
 		var logBuffer bytes.Buffer
 		capture, err := logging.NewLogger().SetWriter(&logBuffer).SetLevel("debug").Build()
 		Expect(err).ToNot(HaveOccurred())
@@ -148,12 +159,27 @@ var _ = Describe("Service-account infrastructure failure boundaries", Serial, fu
 		tls.RootCAs = tool.CaPool().Pool()
 		base := &http.Transport{TLSClientConfig: tls}
 		DeferCleanup(base.CloseIdleConnections)
-		transport := &serviceAccountFaultTransport{base: base, failMapper: mode == "mapper", failDelete: mode == "cleanup"}
+		transport := &serviceAccountFaultTransport{base: base, failRegistration: mode == "registration", failDelete: mode == "cleanup"}
 		client, err := idp.NewClient().SetLogger(capture).SetBaseURL("https://" + keycloakAddr).SetCaPool(tool.CaPool()).SetTokenSource(tokenSource).SetHTTPClient(&http.Client{Transport: transport}).Build()
 		Expect(err).ToNot(HaveOccurred())
 		attribution, err := auth.NewSystemAttributionLogic().SetLogger(capture).Build()
 		Expect(err).ToNot(HaveOccurred())
-		api, err := servers.NewPrivateServiceAccountsServer().SetLogger(capture).SetTenancyLogic(tenancy).SetAttributionLogic(attribution).SetIdpClient(client).Build()
+		secretStore := vault.NewMockSecretStore(ctrl)
+		secretStore.EXPECT().Store(gomock.Any(), tenant, "", gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+		if mode == "commit" {
+			secretStore.EXPECT().Delete(gomock.Any(), tenant, "", gomock.Any()).Return(nil)
+		}
+		if mode == "cleanup" {
+			secretStore.EXPECT().Fetch(gomock.Any(), tenant, "", gomock.Any()).DoAndReturn(func(context.Context, string, string, string) (map[string][]byte, error) {
+				transport.mu.Lock()
+				token := transport.registrationAccessToken
+				transport.mu.Unlock()
+				return map[string][]byte{serviceaccounts.RegistrationAccessTokenKey: []byte(token)}, nil
+			}).Times(2)
+			secretStore.EXPECT().Delete(gomock.Any(), tenant, "", gomock.Any()).Return(nil)
+		}
+		api, err := servers.NewPrivateServiceAccountsServer().SetLogger(capture).SetTenancyLogic(tenancy).SetAttributionLogic(attribution).
+			SetIdpClient(client).SetSecretStore(secretStore).Build()
 		Expect(err).ToNot(HaveOccurred())
 		logs, err := logging.NewInterceptor().SetLogger(capture).SetBodies(true).Build()
 		Expect(err).ToNot(HaveOccurred())
@@ -200,8 +226,9 @@ var _ = Describe("Service-account infrastructure failure boundaries", Serial, fu
 			}
 			Expect(json.Unmarshal(body, &clients)).To(Succeed())
 			for _, remaining := range clients {
-				Expect(client.DisableServiceAccountClient(ctx, remaining.ID)).To(Succeed())
-				Expect(client.DeleteServiceAccountClient(ctx, remaining.ID)).To(Succeed())
+				code, _, e := tool.KeycloakAdminRequest(ctx, http.MethodDelete, "/clients/"+remaining.ID, nil)
+				Expect(e).ToNot(HaveOccurred())
+				Expect(code).To(Or(Equal(http.StatusNoContent), Equal(http.StatusNotFound)))
 			}
 		})
 		response, err := privatev1.NewServiceAccountsClient(connection).Create(caller, privatev1.ServiceAccountsCreateRequest_builder{Object: privatev1.ServiceAccount_builder{Metadata: privatev1.Metadata_builder{Name: "robot", Tenant: tenant}.Build()}.Build()}.Build())
@@ -213,13 +240,13 @@ var _ = Describe("Service-account infrastructure failure boundaries", Serial, fu
 			Expect(err).ToNot(HaveOccurred())
 			pending, err := apiClient.Get(caller, privatev1.ServiceAccountsGetRequest_builder{Id: id}.Build())
 			Expect(err).ToNot(HaveOccurred())
-			cleanup, err := serviceaccount.NewFunction().SetLogger(capture).SetConnection(connection).SetIdpClient(client).Build()
+			cleanup, err := serviceaccount.NewFunction().SetLogger(capture).SetConnection(connection).SetIdpClient(client).SetSecretStore(secretStore).Build()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(cleanup.Run(caller, pending.GetObject())).To(HaveOccurred())
 			retained, err := apiClient.Get(caller, privatev1.ServiceAccountsGetRequest_builder{Id: id}.Build())
 			Expect(err).ToNot(HaveOccurred())
 			Expect(retained.GetObject().GetMetadata().GetFinalizers()).To(ContainElement("fulfillment-controller"))
-			Expect(keycloakClient(ctx, response.GetObject().GetStatus().GetClientId())["enabled"]).To(BeFalse())
+			Expect(keycloakClient(ctx, response.GetObject().GetStatus().GetClientId())["enabled"]).To(BeTrue())
 			Expect(cleanup.Run(caller, retained.GetObject())).To(Succeed())
 			_, err = apiClient.Get(caller, privatev1.ServiceAccountsGetRequest_builder{Id: id}.Build())
 			Expect(status.Code(err)).To(Equal(codes.NotFound))
@@ -256,5 +283,5 @@ var _ = Describe("Service-account infrastructure failure boundaries", Serial, fu
 			Expect(logBuffer.String()).To(ContainSubstring("Failed to create service account"))
 		}
 		Expect(clients).To(BeEmpty(), "failed persistence must compensate the Keycloak client")
-	}, Entry("mapper setup failure compensates real Keycloak", "mapper"), Entry("commit failure compensates without exposing the credential", "commit"), Entry("cleanup retry retains finalizer until real Keycloak deletion", "cleanup"))
+	}, Entry("registration failure leaves no client", "registration"), Entry("commit failure compensates without exposing the credential", "commit"), Entry("cleanup retry retains finalizer until real Keycloak deletion", "cleanup"))
 })

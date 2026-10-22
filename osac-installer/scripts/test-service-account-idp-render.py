@@ -47,19 +47,45 @@ def check():
     expected = {
         "manage-realm", "manage-users", "view-realm", "view-users",
         "manage-identity-providers", "view-identity-providers",
-        "create-client", "manage-clients",
+        "create-client", "view-clients",
     }
     assert set(controller["clientRoles"]["realm-management"]) == expected
     assert controller["serviceAccountClientId"] == "osac-controller"
     static_realm = json.loads(STATIC_REALM.read_text())
     static_controller = next(u for u in static_realm["users"] if u["username"] == "service-account-osac-controller")
     assert set(static_controller["clientRoles"]["realm-management"]) == expected
+    for candidate in (realm, static_realm):
+        registrants = {
+            user["username"] for user in candidate["users"]
+            if "create-client" in user.get("clientRoles", {}).get("realm-management", [])
+        }
+        assert registrants == {"service-account-osac-controller"}, registrants
+        policies = candidate["components"]["org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy"]
+        authenticated = {p["providerId"]: p for p in policies if p["subType"] == "authenticated"}
+        assert {
+            "oidc-hardcoded-claim-mapper",
+            "oidc-audience-mapper",
+            "oidc-usersessionmodel-note-mapper",
+        }.issubset(set(authenticated["allowed-protocol-mappers"]["config"]["allowed-protocol-mapper-types"]))
+        assert "service_account" in authenticated["allowed-client-templates"]["config"]["allowed-client-scopes"]
+        anonymous = {p["providerId"]: p for p in policies if p["subType"] == "anonymous"}
+        assert not {
+            "oidc-hardcoded-claim-mapper",
+            "oidc-audience-mapper",
+            "oidc-usersessionmodel-note-mapper",
+        }.intersection(set(anonymous["allowed-protocol-mappers"]["config"]["allowed-protocol-mapper-types"]))
+        assert "service_account" not in anonymous["allowed-client-templates"]["config"].get("allowed-client-scopes", [])
     setup_documents = [d for d in documents if "kind: ConfigMap\n" in d and "  name: keycloak-password-setup\n" in d]
     assert len(setup_documents) == 1
     setup_document = setup_documents[0]
     setup_script = textwrap.dedent(setup_document.split("  set-passwords.sh: |\n", 1)[1])
     assert "ensure_controller_idp_roles" in setup_script
     assert "role-mappings/clients/${realm_management_id}" in setup_script
+    assert 'keycloak_curl -sf -X DELETE' in setup_script
+    assert 'roles/view-clients' in setup_script
+    assert 'roles/manage-clients' in setup_script
+    assert "ensure_service_account_registration_policies" in setup_script
+    assert 'admin/realms/osac/components/${component_id}' in setup_script
     assert 'curl --cacert "${KEYCLOAK_CA_FILE}" "$@"' in setup_script
     assert "curl -k" not in setup_script
     subprocess.run(["bash", "-n"], input=setup_script, check=True, text=True)

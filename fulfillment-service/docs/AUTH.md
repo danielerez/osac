@@ -346,9 +346,11 @@ Keycloak, this means the `realm-management` client roles: `manage-realm`, `manag
 if the service account has both API access and IDP management permissions.
 
 The same `idp.credentials` principal creates and deletes service-account clients. Grant it the
-`realm-management` client roles `create-client` and `manage-clients` in addition to its existing
-roles. The Fulfillment gRPC server reads these credentials from
-`/etc/fulfillment-grpc-server/idp`; no `realm-admin` grant is required.
+`realm-management` client roles `create-client` and `view-clients` in addition to its existing
+roles. `view-clients` is read-only; the controller uses it to check one stored client UUID when a
+registration-token delete returns HTTP 401. Each created client's registration access token is
+stored in Vault and authorizes its deletion. The Fulfillment gRPC server reads these credentials
+from `/etc/fulfillment-grpc-server/idp`; no `realm-admin` or `manage-clients` grant is required.
 
 ### 6. Trusted Token Issuers
 
@@ -650,6 +652,8 @@ The fulfillment service implements a comprehensive authorization model that comb
 - All client-level permissions (inherits from `has_client_permissions`)
 - User management (Create/Get/List/Update/Delete users within their tenant)
 - IdP management (Full CRUD on IdentityProviders within their tenant)
+- Service-account management (Create/Get/List/Update/Delete service accounts within
+  their tenant)
 - Bare-metal catalog item management (Create/Update/Delete tenant-scoped catalog items)
 - Project creation
 

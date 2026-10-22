@@ -34,6 +34,7 @@ import (
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
 	"github.com/osac-project/osac/fulfillment-service/internal/idp"
 	"github.com/osac-project/osac/fulfillment-service/internal/logging"
+	"github.com/osac-project/osac/fulfillment-service/internal/serviceaccounts"
 	testutils "github.com/osac-project/osac/fulfillment-service/internal/testing"
 	publicv1 "github.com/osac-project/osac/proto/gen/osac/public/v1"
 )
@@ -42,8 +43,10 @@ var _ = Describe("Service account creation", func() {
 	const clientUUID = "d3c4e3db-95b8-481d-8b5c-963da477da12"
 	const secondClientUUID = "a3c4e3db-95b8-481d-8b5c-963da477da12"
 	const credential = "test-only-credential-marker"
+	const registrationToken = "test-only-registration-token-marker"
 	var public *ServiceAccountsServer
 	var idpClient *idp.MockClientInterface
+	var secretStore *memorySecretStore
 	var request *publicv1.ServiceAccountsCreateRequest
 	var create func(context.Context, *publicv1.ServiceAccountsCreateRequest) (*publicv1.ServiceAccountsCreateResponse, error)
 	var caller context.Context
@@ -54,8 +57,9 @@ var _ = Describe("Service account creation", func() {
 		tenancyLogic, err := auth.NewDefaultTenancyLogic().SetLogger(logger).Build()
 		Expect(err).ToNot(HaveOccurred())
 		idpClient = idp.NewMockClientInterface(ctrl)
+		secretStore = newMemorySecretStore()
 		public, err = NewServiceAccountsServer().SetLogger(logger).SetAttributionLogic(attribution).
-			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).Build()
+			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).SetSecretStore(secretStore).Build()
 		Expect(err).ToNot(HaveOccurred())
 		txInterceptor, err := database.NewTxInterceptor().SetLogger(logger).SetManager(tm).
 			SetMethodsWithoutAutomaticTransaction(publicv1.ServiceAccounts_Create_FullMethodName).Build()
@@ -77,7 +81,7 @@ var _ = Describe("Service account creation", func() {
 	It("reserves a generated identity and returns a transient initial credential", func() {
 		var assignedClientID string
 		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
-			DoAndReturn(func(ctx context.Context, clientID, tenant string) (string, string, error) {
+			DoAndReturn(func(ctx context.Context, clientID, tenant string) (string, string, string, error) {
 				assignedClientID = clientID
 				id := strings.TrimPrefix(clientID, "osac-sa-"+testTenant+"-")
 				_, err := uuid.Parse(id)
@@ -89,7 +93,7 @@ var _ = Describe("Service account creation", func() {
 				var count int
 				Expect(testPool.QueryRow(ctx, `select count(*) from service_accounts where id=$1 and tenant=$2`, id, tenant).Scan(&count)).To(Succeed())
 				Expect(count).To(BeZero(), "Keycloak setup must happen before persistence")
-				return clientUUID, credential, nil
+				return clientUUID, credential, registrationToken, nil
 			})
 		request.GetObject().SetStatus(publicv1.ServiceAccountStatus_builder{ClientId: "forged"}.Build())
 		request.GetObject().GetMetadata().SetAnnotations(map[string]string{"osac.openshift.io/tenant": "forged"})
@@ -100,6 +104,9 @@ var _ = Describe("Service account creation", func() {
 		Expect(response.GetObject().GetMetadata().GetDisplayName()).To(Equal("Build robot"))
 		Expect(response.GetObject().GetMetadata().GetTenant()).To(Equal(testTenant))
 		Expect(response.GetObject().GetMetadata().GetAnnotations()).To(HaveKeyWithValue("osac.openshift.io/tenant", testTenant))
+		storedCredential, err := secretStore.Fetch(ctx, testTenant, "", serviceaccounts.RegistrationSecretName(response.GetObject().GetId()))
+		Expect(err).ToNot(HaveOccurred())
+		Expect(storedCredential[serviceaccounts.RegistrationAccessTokenKey]).To(Equal([]byte(registrationToken)))
 		var data, target string
 		Expect(testPool.QueryRow(ctx, `select data::text, data->'status'->>'keycloak_client_uuid' from service_accounts where id=$1`, response.GetObject().GetId()).Scan(&data, &target)).To(Succeed())
 		Expect(target).To(Equal(clientUUID))
@@ -142,7 +149,7 @@ var _ = Describe("Service account creation", func() {
 		}),
 		Entry("bad name", func(o *publicv1.ServiceAccount) { o.GetMetadata().SetName("Invalid_name") }))
 	It("rejects a duplicate name before creating another client", func() {
-		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(clientUUID, credential, nil)
+		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(clientUUID, credential, registrationToken, nil)
 		_, err := create(caller, request)
 		Expect(err).ToNot(HaveOccurred())
 		response, err := create(caller, request)
@@ -166,7 +173,7 @@ var _ = Describe("Service account creation", func() {
 		var next int
 		clientUUIDByID := make(map[string]string)
 		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
-			DoAndReturn(func(_ context.Context, clientID, _ string) (string, string, error) {
+			DoAndReturn(func(_ context.Context, clientID, _ string) (string, string, string, error) {
 				mu.Lock()
 				generatedUUID := clientUUID
 				if next == 1 {
@@ -177,12 +184,11 @@ var _ = Describe("Service account creation", func() {
 				mu.Unlock()
 				arrived <- struct{}{}
 				<-release
-				return generatedUUID, credential, nil
+				return generatedUUID, credential, registrationToken, nil
 			}).Times(2)
-		var cleanedUUID string
-		idpClient.EXPECT().DisableServiceAccountClient(gomock.Any(), gomock.Any()).DoAndReturn(
-			func(_ context.Context, id string) error { cleanedUUID = id; return nil }).Times(1)
-		idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+		var cleanedClientID string
+		idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any(), gomock.Any(), registrationToken).DoAndReturn(
+			func(_ context.Context, id, _, _ string) error { cleanedClientID = id; return nil }).Times(1)
 		start := make(chan struct{})
 		results := make(chan result, 2)
 		var workers sync.WaitGroup
@@ -207,12 +213,14 @@ var _ = Describe("Service account creation", func() {
 		}
 		createdClientID := created.response.GetObject().GetStatus().GetClientId()
 		mu.Lock()
-		expectedCleanupUUID := clientUUID
-		if clientUUIDByID[createdClientID] == clientUUID {
-			expectedCleanupUUID = secondClientUUID
+		var expectedCleanupClientID string
+		for id := range clientUUIDByID {
+			if id != createdClientID {
+				expectedCleanupClientID = id
+			}
 		}
 		mu.Unlock()
-		Expect(cleanedUUID).To(Equal(expectedCleanupUUID))
+		Expect(cleanedClientID).To(Equal(expectedCleanupClientID))
 	})
 	It("compensates a client if persistence fails after successful setup", func() {
 		_, err := testPool.Exec(ctx, `create function reject_service_account_insert() returns trigger language plpgsql as $$
@@ -221,9 +229,8 @@ var _ = Describe("Service account creation", func() {
 		for each row execute function reject_service_account_insert()`)
 		Expect(err).ToNot(HaveOccurred())
 		gomock.InOrder(
-			idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(clientUUID, credential, nil),
-			idpClient.EXPECT().DisableServiceAccountClient(gomock.Any(), clientUUID).Return(nil),
-			idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), clientUUID).Return(nil),
+			idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(clientUUID, credential, registrationToken, nil),
+			idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any(), gomock.Any(), registrationToken).Return(nil),
 		)
 		response, err := create(caller, request)
 		Expect(status.Code(err)).To(Equal(codes.Internal))
@@ -231,6 +238,31 @@ var _ = Describe("Service account creation", func() {
 		var count int
 		Expect(testPool.QueryRow(ctx, `select count(*) from service_accounts`).Scan(&count)).To(Succeed())
 		Expect(count).To(BeZero())
+	})
+	It("deletes the stored credential even when client compensation fails", func() {
+		_, err := testPool.Exec(ctx, `create function reject_service_account_insert() returns trigger language plpgsql as $$
+		begin raise exception 'test insert failure'; end $$;
+		create trigger reject_service_account_insert before insert on service_accounts
+		for each row execute function reject_service_account_insert()`)
+		Expect(err).ToNot(HaveOccurred())
+		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
+			Return(clientUUID, credential, registrationToken, nil)
+		idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any(), gomock.Any(), registrationToken).
+			DoAndReturn(func(context.Context, string, string, string) error {
+				secretStore.mu.Lock()
+				storedSecrets := len(secretStore.data)
+				secretStore.mu.Unlock()
+				Expect(storedSecrets).To(Equal(1), "the credential must be stored before client compensation")
+				return errors.New("Keycloak cleanup failed")
+			})
+
+		response, err := create(caller, request)
+		Expect(status.Code(err)).To(Equal(codes.Internal))
+		Expect(response).To(BeNil())
+		secretStore.mu.Lock()
+		storedSecrets := len(secretStore.data)
+		secretStore.mu.Unlock()
+		Expect(storedSecrets).To(BeZero(), "Vault cleanup should run despite the Keycloak deletion failure")
 	})
 	It("returns INTERNAL without a credential when commit fails after successful setup", func() {
 		_, err := testPool.Exec(ctx, `create function reject_service_account_commit() returns trigger language plpgsql as $$
@@ -243,7 +275,7 @@ var _ = Describe("Service account creation", func() {
 		tenancyLogic, err := auth.NewDefaultTenancyLogic().SetLogger(capturedLogger).Build()
 		Expect(err).ToNot(HaveOccurred())
 		api, err := NewServiceAccountsServer().SetLogger(capturedLogger).SetAttributionLogic(attribution).
-			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).Build()
+			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).SetSecretStore(secretStore).Build()
 		Expect(err).ToNot(HaveOccurred())
 		logs, err := logging.NewInterceptor().SetLogger(capturedLogger).SetBodies(true).Build()
 		Expect(err).ToNot(HaveOccurred())
@@ -262,12 +294,11 @@ var _ = Describe("Service account creation", func() {
 		var clientID string
 		gomock.InOrder(
 			idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
-				DoAndReturn(func(_ context.Context, id, _ string) (string, string, error) {
+				DoAndReturn(func(_ context.Context, id, _ string) (string, string, string, error) {
 					clientID = id
-					return clientUUID, credential, nil
+					return clientUUID, credential, registrationToken, nil
 				}),
-			idpClient.EXPECT().DisableServiceAccountClient(gomock.Any(), clientUUID).Return(nil),
-			idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), clientUUID).Return(nil),
+			idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any(), gomock.Any(), registrationToken).Return(nil),
 		)
 		response, err := publicv1.NewServiceAccountsClient(connection).Create(caller, request)
 		Expect(status.Code(err)).To(Equal(codes.Internal))
@@ -284,18 +315,17 @@ var _ = Describe("Service account creation", func() {
 		cancelled, cancel := context.WithCancel(caller)
 		defer cancel()
 		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
-			DoAndReturn(func(context.Context, string, string) (string, string, error) {
+			DoAndReturn(func(context.Context, string, string) (string, string, string, error) {
 				cancel()
-				return clientUUID, "", context.Canceled
+				return clientUUID, "", registrationToken, context.Canceled
 			})
 		gomock.InOrder(
-			idpClient.EXPECT().DisableServiceAccountClient(gomock.Any(), clientUUID).DoAndReturn(func(cleanup context.Context, _ string) error {
+			idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any(), gomock.Any(), registrationToken).DoAndReturn(func(cleanup context.Context, _, _, _ string) error {
 				Expect(cleanup.Err()).ToNot(HaveOccurred())
 				_, bounded := cleanup.Deadline()
 				Expect(bounded).To(BeTrue())
 				return nil
 			}),
-			idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), clientUUID).Return(nil),
 		)
 		response, err := create(cancelled, request)
 		Expect(err).To(HaveOccurred())
@@ -306,20 +336,23 @@ var _ = Describe("Service account creation", func() {
 	})
 
 	DescribeTable("rolls back setup failures and compensates only known created clients", func(partialUUID string, cleanupFails bool) {
-		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(partialUUID, "", errors.New("upstream "+credential))
+		partialToken := ""
+		if partialUUID != "" {
+			partialToken = registrationToken
+		}
+		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(partialUUID, "", partialToken, errors.New("upstream "+credential))
 		if partialUUID != "" {
 			var cleanupError error
 			if cleanupFails {
 				cleanupError = errors.New("cleanup " + credential)
 			}
 			gomock.InOrder(
-				idpClient.EXPECT().DisableServiceAccountClient(gomock.Any(), clientUUID).DoAndReturn(func(ctx context.Context, _ string) error {
+				idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any(), gomock.Any(), registrationToken).DoAndReturn(func(ctx context.Context, _, _, _ string) error {
 					Expect(ctx.Err()).ToNot(HaveOccurred())
 					_, bounded := ctx.Deadline()
 					Expect(bounded).To(BeTrue())
 					return cleanupError
 				}),
-				idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), clientUUID).Return(cleanupError),
 			)
 		}
 		response, err := create(caller, request)

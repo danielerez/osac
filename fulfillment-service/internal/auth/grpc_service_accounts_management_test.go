@@ -48,7 +48,7 @@ var _ = Describe("Service account management authorization", func() {
 							}
 							return nil, nil
 						})
-					allowed := admin || (tenantAdmin && api == "public")
+					allowed := admin || (tenantAdmin && api == "public" && method != "RegenerateSecret")
 					Expect(called).To(Equal(allowed), api+"/"+method)
 					if allowed {
 						Expect(err).ToNot(HaveOccurred())

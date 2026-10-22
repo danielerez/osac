@@ -343,7 +343,7 @@ func (r *request[O]) setMetadata(object O, metadata metadataIface) {
 		metadataReflect := metadata.ProtoReflect()
 		if objectReflect.Has(r.dao.metadataField) {
 			dataMetadata := objectReflect.Get(r.dao.metadataField).Message()
-			for _, name := range []protoreflect.Name{"display_name", "description"} {
+			for _, name := range r.dao.metadataFieldsInData {
 				field := dataMetadata.Descriptor().Fields().ByName(name)
 				if field != nil && dataMetadata.Has(field) {
 					metadataReflect.Set(field, dataMetadata.Get(field))

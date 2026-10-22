@@ -40,11 +40,12 @@ var _ = Describe("Service account management", func() {
 		tenancyLogic, err := auth.NewDefaultTenancyLogic().SetLogger(logger).Build()
 		Expect(err).ToNot(HaveOccurred())
 		idpClient := idp.NewMockClientInterface(ctrl)
+		secretStore := newMemorySecretStore()
 		public, err = NewServiceAccountsServer().SetLogger(logger).SetAttributionLogic(attribution).
-			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).Build()
+			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).SetSecretStore(secretStore).Build()
 		Expect(err).ToNot(HaveOccurred())
 		private, err = NewPrivateServiceAccountsServer().SetLogger(logger).SetAttributionLogic(attribution).
-			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).Build()
+			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).SetSecretStore(secretStore).Build()
 		Expect(err).ToNot(HaveOccurred())
 		roleDAO, err := dao.NewGenericDAO[*privatev1.Role]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
 		Expect(err).ToNot(HaveOccurred())
@@ -64,7 +65,11 @@ var _ = Describe("Service account management", func() {
 		for _, role := range catalog.GetItems() {
 			roles[role.GetMetadata().GetName()] = role.GetId()
 		}
-		accountDAO, err := dao.NewGenericDAO[*privatev1.ServiceAccount]().SetLogger(logger).SetTenancyLogic(tenancy).Build()
+		accountDAO, err := dao.NewGenericDAO[*privatev1.ServiceAccount]().
+			SetLogger(logger).
+			SetTenancyLogic(tenancy).
+			SetPersistNonColumnMetadataFields().
+			Build()
 		Expect(err).ToNot(HaveOccurred())
 		created, err := accountDAO.Create().SetObject(privatev1.ServiceAccount_builder{
 			Metadata: privatev1.Metadata_builder{Name: "robot", Tenant: testTenant, Creator: "admin",
@@ -89,6 +94,8 @@ var _ = Describe("Service account management", func() {
 	It("returns public status and a tenant-filtered list", func() {
 		got, err := public.Get(tenantCtx, publicv1.ServiceAccountsGetRequest_builder{Id: stored.GetId()}.Build())
 		Expect(err).ToNot(HaveOccurred())
+		Expect(got.GetObject().GetMetadata().GetDisplayName()).To(Equal("Old"))
+		Expect(got.GetObject().GetMetadata().GetDescription()).To(Equal("Old description"))
 		Expect(got.GetObject().GetStatus().GetClientId()).To(Equal(stored.GetStatus().GetClientId()))
 		list, err := public.List(tenantCtx, publicv1.ServiceAccountsListRequest_builder{Limit: proto.Int32(1)}.Build())
 		Expect(err).ToNot(HaveOccurred())

@@ -40,6 +40,7 @@ import (
 
 var _ = Describe("Service account creation", func() {
 	const clientUUID = "d3c4e3db-95b8-481d-8b5c-963da477da12"
+	const secondClientUUID = "a3c4e3db-95b8-481d-8b5c-963da477da12"
 	const credential = "test-only-credential-marker"
 	var public *ServiceAccountsServer
 	var idpClient *idp.MockClientInterface
@@ -56,7 +57,8 @@ var _ = Describe("Service account creation", func() {
 		public, err = NewServiceAccountsServer().SetLogger(logger).SetAttributionLogic(attribution).
 			SetTenancyLogic(tenancyLogic).SetIdpClient(idpClient).Build()
 		Expect(err).ToNot(HaveOccurred())
-		txInterceptor, err := database.NewTxInterceptor().SetLogger(logger).SetManager(tm).Build()
+		txInterceptor, err := database.NewTxInterceptor().SetLogger(logger).SetManager(tm).
+			SetMethodsWithoutAutomaticTransaction(publicv1.ServiceAccounts_Create_FullMethodName).Build()
 		Expect(err).ToNot(HaveOccurred())
 		create = func(ctx context.Context, req *publicv1.ServiceAccountsCreateRequest) (*publicv1.ServiceAccountsCreateResponse, error) {
 			response, err := txInterceptor.UnaryServer(ctx, req, &grpc.UnaryServerInfo{FullMethod: publicv1.ServiceAccounts_Create_FullMethodName},
@@ -80,11 +82,13 @@ var _ = Describe("Service account creation", func() {
 				id := strings.TrimPrefix(clientID, "osac-sa-"+testTenant+"-")
 				_, err := uuid.Parse(id)
 				Expect(err).ToNot(HaveOccurred())
-				tx, err := database.TxFromContext(ctx)
-				Expect(err).ToNot(HaveOccurred())
-				var finalizers []string
-				Expect(tx.QueryRow(ctx, `select finalizers from service_accounts where id=$1 and tenant=$2`, id, tenant).Scan(&finalizers)).To(Succeed())
-				Expect(finalizers).To(ContainElement("fulfillment-controller"))
+				_, err = database.TxFromContext(ctx)
+				Expect(err).To(MatchError("failed to get transaction from context"))
+				_, hasDeadline := ctx.Deadline()
+				Expect(hasDeadline).To(BeTrue())
+				var count int
+				Expect(testPool.QueryRow(ctx, `select count(*) from service_accounts where id=$1 and tenant=$2`, id, tenant).Scan(&count)).To(Succeed())
+				Expect(count).To(BeZero(), "Keycloak setup must happen before persistence")
 				return clientUUID, credential, nil
 			})
 		request.GetObject().SetStatus(publicv1.ServiceAccountStatus_builder{ClientId: "forged"}.Build())
@@ -112,6 +116,7 @@ var _ = Describe("Service account creation", func() {
 		Expect(request.GetObject().GetStatus().GetClientId()).To(Equal("forged"), "input must remain unmodified")
 	})
 	It("validates a dry run without creating a row, client, or secret", func() {
+		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
 		dry := metadata.NewIncomingContext(caller, metadata.Pairs(DryRunMetadataKey, "true"))
 		response, err := create(dry, request)
 		Expect(err).ToNot(HaveOccurred())
@@ -148,27 +153,72 @@ var _ = Describe("Service account creation", func() {
 		Expect(count).To(Equal(1))
 	})
 	It("allows only one concurrent create for a tenant and name", func() {
-		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(clientUUID, credential, nil).Times(1)
+		type result struct {
+			response *publicv1.ServiceAccountsCreateResponse
+			code     codes.Code
+		}
+		arrived := make(chan struct{}, 2)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseCalls := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseCalls()
+		var mu sync.Mutex
+		var next int
+		clientUUIDByID := make(map[string]string)
+		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
+			DoAndReturn(func(_ context.Context, clientID, _ string) (string, string, error) {
+				mu.Lock()
+				generatedUUID := clientUUID
+				if next == 1 {
+					generatedUUID = secondClientUUID
+				}
+				next++
+				clientUUIDByID[clientID] = generatedUUID
+				mu.Unlock()
+				arrived <- struct{}{}
+				<-release
+				return generatedUUID, credential, nil
+			}).Times(2)
+		var cleanedUUID string
+		idpClient.EXPECT().DisableServiceAccountClient(gomock.Any(), gomock.Any()).DoAndReturn(
+			func(_ context.Context, id string) error { cleanedUUID = id; return nil }).Times(1)
+		idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), gomock.Any()).Return(nil).Times(1)
 		start := make(chan struct{})
-		results := make(chan codes.Code, 2)
+		results := make(chan result, 2)
 		var workers sync.WaitGroup
 		for range 2 {
 			workers.Go(func() {
 				defer GinkgoRecover()
 				<-start
-				_, err := create(caller, proto.Clone(request).(*publicv1.ServiceAccountsCreateRequest))
-				results <- status.Code(err)
+				response, err := create(caller, proto.Clone(request).(*publicv1.ServiceAccountsCreateRequest))
+				results <- result{response: response, code: status.Code(err)}
 			})
 		}
 		close(start)
+		Eventually(arrived).Should(Receive())
+		Eventually(arrived).Should(Receive())
+		releaseCalls()
 		workers.Wait()
-		Expect([]codes.Code{<-results, <-results}).To(ConsistOf(codes.OK, codes.AlreadyExists))
+		first, second := <-results, <-results
+		Expect([]codes.Code{first.code, second.code}).To(ConsistOf(codes.OK, codes.AlreadyExists))
+		created := first
+		if created.code != codes.OK {
+			created = second
+		}
+		createdClientID := created.response.GetObject().GetStatus().GetClientId()
+		mu.Lock()
+		expectedCleanupUUID := clientUUID
+		if clientUUIDByID[createdClientID] == clientUUID {
+			expectedCleanupUUID = secondClientUUID
+		}
+		mu.Unlock()
+		Expect(cleanedUUID).To(Equal(expectedCleanupUUID))
 	})
 	It("compensates a client if persistence fails after successful setup", func() {
-		_, err := testPool.Exec(ctx, `create function reject_service_account_status() returns trigger language plpgsql as $$
-		begin raise exception 'test status failure'; end $$;
-		create trigger reject_service_account_status before update on service_accounts
-		for each row execute function reject_service_account_status()`)
+		_, err := testPool.Exec(ctx, `create function reject_service_account_insert() returns trigger language plpgsql as $$
+		begin raise exception 'test insert failure'; end $$;
+		create trigger reject_service_account_insert before insert on service_accounts
+		for each row execute function reject_service_account_insert()`)
 		Expect(err).ToNot(HaveOccurred())
 		gomock.InOrder(
 			idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).Return(clientUUID, credential, nil),
@@ -210,17 +260,21 @@ var _ = Describe("Service account creation", func() {
 		Expect(err).ToNot(HaveOccurred())
 		DeferCleanup(connection.Close)
 		var clientID string
-		idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
-			DoAndReturn(func(_ context.Context, id, _ string) (string, string, error) {
-				clientID = id
-				return clientUUID, credential, nil
-			})
+		gomock.InOrder(
+			idpClient.EXPECT().CreateServiceAccountClient(gomock.Any(), gomock.Any(), testTenant).
+				DoAndReturn(func(_ context.Context, id, _ string) (string, string, error) {
+					clientID = id
+					return clientUUID, credential, nil
+				}),
+			idpClient.EXPECT().DisableServiceAccountClient(gomock.Any(), clientUUID).Return(nil),
+			idpClient.EXPECT().DeleteServiceAccountClient(gomock.Any(), clientUUID).Return(nil),
+		)
 		response, err := publicv1.NewServiceAccountsClient(connection).Create(caller, request)
 		Expect(status.Code(err)).To(Equal(codes.Internal))
 		Expect(response).To(BeNil())
 		Expect(buffer.String()).ToNot(ContainSubstring(credential))
 		Expect(buffer.String()).To(ContainSubstring(clientID))
-		Expect(buffer.String()).To(ContainSubstring("Failed to end transaction"))
+		Expect(buffer.String()).To(ContainSubstring("Failed to create service account"))
 		var count int
 		Expect(testPool.QueryRow(ctx, `select count(*) from service_accounts`).Scan(&count)).To(Succeed())
 		Expect(count).To(BeZero())

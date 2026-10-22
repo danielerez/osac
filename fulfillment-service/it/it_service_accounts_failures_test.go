@@ -157,7 +157,8 @@ var _ = Describe("Service-account infrastructure failure boundaries", Serial, fu
 		Expect(err).ToNot(HaveOccurred())
 		logs, err := logging.NewInterceptor().SetLogger(capture).SetBodies(true).Build()
 		Expect(err).ToNot(HaveOccurred())
-		transactions, err := database.NewTxInterceptor().SetLogger(capture).SetManager(manager).Build()
+		transactions, err := database.NewTxInterceptor().SetLogger(capture).SetManager(manager).
+			SetMethodsWithoutAutomaticTransaction(privatev1.ServiceAccounts_Create_FullMethodName).Build()
 		Expect(err).ToNot(HaveOccurred())
 		validator, err := validation.NewProtovalidateInterceptor().SetLogger(capture).Build()
 		Expect(err).ToNot(HaveOccurred())
@@ -252,11 +253,8 @@ var _ = Describe("Service-account infrastructure failure boundaries", Serial, fu
 		if lateCommit {
 			Expect(secret).ToNot(BeEmpty())
 			Expect(strings.Contains(logBuffer.String(), secret)).To(BeFalse())
-			Expect(clients).To(HaveLen(1))
-			Expect(clients[0]["enabled"]).To(BeTrue())
-			Expect(logBuffer.String()).To(ContainSubstring("Failed to end transaction"))
-		} else {
-			Expect(clients).To(BeEmpty())
+			Expect(logBuffer.String()).To(ContainSubstring("Failed to create service account"))
 		}
-	}, Entry("mapper setup failure compensates real Keycloak", "mapper"), Entry("commit failure exposes only safe orphan diagnostics", "commit"), Entry("cleanup retry retains finalizer until real Keycloak deletion", "cleanup"))
+		Expect(clients).To(BeEmpty(), "failed persistence must compensate the Keycloak client")
+	}, Entry("mapper setup failure compensates real Keycloak", "mapper"), Entry("commit failure compensates without exposing the credential", "commit"), Entry("cleanup retry retains finalizer until real Keycloak deletion", "cleanup"))
 })

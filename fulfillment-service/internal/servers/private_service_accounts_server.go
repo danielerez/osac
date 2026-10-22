@@ -16,12 +16,7 @@ package servers
 import (
 	"context"
 	"errors"
-	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
-	"github.com/osac-project/osac/fulfillment-service/internal/serviceaccounts"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -30,10 +25,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/osac-project/osac/fulfillment-service/internal/controllers/finalizers"
 	"github.com/osac-project/osac/fulfillment-service/internal/database"
-
+	"github.com/osac-project/osac/fulfillment-service/internal/database/dao"
+	"github.com/osac-project/osac/fulfillment-service/internal/serviceaccounts"
+	osacuuid "github.com/osac-project/osac/fulfillment-service/internal/uuid"
 	"github.com/prometheus/client_golang/prometheus"
-
+	"google.golang.org/grpc/codes"
+	grpcmetadata "google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/osac-project/osac/fulfillment-service/internal/auth"
 	"github.com/osac-project/osac/fulfillment-service/internal/idp"
@@ -53,6 +54,7 @@ type PrivateServiceAccountsServerBuilder struct {
 var _ privatev1.ServiceAccountsServer = (*PrivateServiceAccountsServer)(nil)
 
 const maxAssignableServiceAccountRoles = 4
+const serviceAccountIDPTimeout = 30 * time.Second
 
 // PrivateServiceAccountsServer implements the private service accounts gRPC service.
 type PrivateServiceAccountsServer struct {
@@ -158,31 +160,49 @@ func (s *PrivateServiceAccountsServer) Get(ctx context.Context,
 
 func (s *PrivateServiceAccountsServer) Create(ctx context.Context,
 	request *privatev1.ServiceAccountsCreateRequest) (response *privatev1.ServiceAccountsCreateResponse, err error) {
-	tx, err := database.TxFromContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.ReportError(&err)
 	if request.GetObject().GetId() != "" {
 		return nil, status.Error(codes.InvalidArgument, "service-account ID is assigned by the server")
 	}
-	err = s.generic.CreateWithCandidatePreparation(ctx, request, &response, s.prepareCreate)
-	if err != nil || isDryRun(ctx) {
-		return
+
+	account, err := database.WithNewTx(ctx, func(txCtx context.Context) (*privatev1.ServiceAccount, error) {
+		var prepared *privatev1.ServiceAccountsCreateResponse
+		if err := s.generic.CreateWithCandidatePreparation(withDryRun(txCtx), request, &prepared, s.prepareCreate); err != nil {
+			return nil, err
+		}
+		account := prepared.GetObject()
+		if !isDryRun(ctx) {
+			if err := s.ensureNameAvailable(txCtx, account); err != nil {
+				return nil, err
+			}
+		}
+		return account, nil
+	})
+	if err != nil {
+		return nil, s.mapCreateError(ctx, err)
 	}
-	account := response.GetObject()
+	if isDryRun(ctx) {
+		response = &privatev1.ServiceAccountsCreateResponse{}
+		response.SetObject(account)
+		return response, nil
+	}
+
+	account.SetId(osacuuid.New())
 	tenant := account.GetMetadata().GetTenant()
 	clientID := serviceaccounts.ClientID(tenant, account.GetId())
 	s.logger.InfoContext(ctx, "Creating service-account client", "tenant", tenant, "account_id", account.GetId(), "client_id", clientID)
-	clientUUID, secret, setupErr := s.idpClient.CreateServiceAccountClient(ctx, clientID, tenant)
+	idpCtx := ctx
+	var clientUUID string
 	defer func() {
 		if err != nil {
 			response = nil
 			if clientUUID != "" {
-				s.compensateClient(ctx, clientUUID, clientID)
+				s.compensateClient(idpCtx, clientUUID, clientID)
 			}
 		}
 	}()
+	setupCtx, cancel := context.WithTimeout(idpCtx, serviceAccountIDPTimeout)
+	clientUUID, secret, setupErr := s.idpClient.CreateServiceAccountClient(setupCtx, clientID, tenant)
+	cancel()
 	if setupErr != nil {
 		return nil, status.Error(codes.Unavailable, "failed to configure service-account client")
 	}
@@ -190,13 +210,55 @@ func (s *PrivateServiceAccountsServer) Create(ctx context.Context,
 		return nil, status.Error(codes.Unavailable, "invalid service-account client setup result")
 	}
 	account.SetStatus(privatev1.ServiceAccountStatus_builder{ClientId: clientID, KeycloakClientUuid: clientUUID}.Build())
-	updated, updateErr := s.generic.dao.Update().SetObject(account).Do(ctx)
-	if updateErr != nil {
-		return nil, ConvertDAOErrorToGRPC(updateErr, "update", account.GetId())
+
+	created, err := database.WithNewTx(ctx, func(txCtx context.Context) (*privatev1.ServiceAccountsCreateResponse, error) {
+		request := privatev1.ServiceAccountsCreateRequest_builder{Object: account}.Build()
+		var created *privatev1.ServiceAccountsCreateResponse
+		err := s.generic.CreateWithCandidatePreparation(txCtx, request, &created,
+			func(ctx context.Context, _, candidate *privatev1.ServiceAccount) error {
+				return s.validateRoles(ctx, candidate)
+			})
+		return created, err
+	})
+	if err != nil {
+		return nil, s.mapCreateError(ctx, err)
 	}
-	response.SetObject(updated.GetObject())
+	response = &privatev1.ServiceAccountsCreateResponse{}
+	response.SetObject(created.GetObject())
 	response.SetClientSecret(secret)
 	return
+}
+
+func withDryRun(ctx context.Context) context.Context {
+	md, ok := grpcmetadata.FromIncomingContext(ctx)
+	if ok {
+		md = md.Copy()
+	} else {
+		md = grpcmetadata.MD{}
+	}
+	md.Set(DryRunMetadataKey, "true")
+	return grpcmetadata.NewIncomingContext(ctx, md)
+}
+
+func (s *PrivateServiceAccountsServer) ensureNameAvailable(ctx context.Context, account *privatev1.ServiceAccount) error {
+	filter := fmt.Sprintf("this.metadata.name == %q && this.metadata.tenant == %q",
+		account.GetMetadata().GetName(), account.GetMetadata().GetTenant())
+	existing, err := s.generic.dao.List().SetFilter(filter).SetLimit(0).Do(ctx)
+	if err != nil {
+		return err
+	}
+	if existing.GetTotal() > 0 {
+		return status.Error(codes.AlreadyExists, "service account already exists")
+	}
+	return nil
+}
+
+func (s *PrivateServiceAccountsServer) mapCreateError(ctx context.Context, err error) error {
+	if _, ok := status.FromError(err); ok {
+		return err
+	}
+	s.logger.ErrorContext(ctx, "Failed to create service account", slog.Any("error", err))
+	return status.Error(codes.Internal, "failed to create service account")
 }
 
 func (s *PrivateServiceAccountsServer) prepareCreate(ctx context.Context, _, account *privatev1.ServiceAccount) error {

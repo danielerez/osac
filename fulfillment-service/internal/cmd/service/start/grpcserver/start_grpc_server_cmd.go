@@ -582,6 +582,10 @@ func (c *runnerContext) run(cmd *cobra.Command, argv []string) error { //nolint:
 	txInterceptor, err := database.NewTxInterceptor().
 		SetLogger(c.logger).
 		SetManager(txManager).
+		SetMethodsWithoutAutomaticTransaction(
+			publicv1.ServiceAccounts_Create_FullMethodName,
+			privatev1.ServiceAccounts_Create_FullMethodName,
+		).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to create transactions interceptor: %w", err)

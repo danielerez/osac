@@ -53,3 +53,21 @@ var _ = Describe("Service account identity", func() {
 		Expect(name).ToNot(Equal(serviceaccounts.RegistrationSecretName("robot", 0)))
 	})
 })
+
+var _ = Describe("Service-account authorization roles", func() {
+	DescribeTable("limits grants to the supported role catalog", func(name string, assignable, machineOnly bool) {
+		Expect(serviceaccounts.IsAssignableRole(name)).To(Equal(assignable))
+		Expect(serviceaccounts.IsMachineOnlyRole(name)).To(Equal(machineOnly))
+	},
+		Entry("automation", "tenant-automation", true, true),
+		Entry("CSI", "osac-csi-driver", true, true),
+		Entry("tenant admin", "tenant-admin", true, false),
+		Entry("IdP manager", "tenant-idp-manager", true, false),
+		Entry("removed user", "tenant-user", false, false),
+		Entry("removed reader", "tenant-reader", false, false),
+		Entry("provider", "cloud-provider-admin", false, false),
+		Entry("realm role", "realm-management", false, false),
+		Entry("unknown", "custom", false, false),
+		Entry("empty", "", false, false),
+	)
+})

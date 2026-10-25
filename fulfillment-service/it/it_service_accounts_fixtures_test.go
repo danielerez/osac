@@ -121,12 +121,7 @@ func keycloakServiceAccountClientIDs(ctx context.Context, tenant string) []strin
 
 func serviceAccountClaims(ctx context.Context, clientID, secret string) jwt.MapClaims {
 	GinkgoHelper()
-	issuer := serviceAccountKeycloakIssuer(ctx)
-	store, err := auth.NewMemoryTokenStore().SetLogger(logger).Build()
-	Expect(err).ToNot(HaveOccurred())
-	source, err := oauth.NewTokenSource().SetLogger(logger).SetStore(store).SetCaPool(tool.CaPool()).SetIssuer(issuer).
-		SetFlow(oauth.CredentialsFlow).SetClientId(clientID).SetClientSecret(secret).Build()
-	Expect(err).ToNot(HaveOccurred())
+	source, issuer := serviceAccountTokenSource(ctx, clientID, secret)
 	token, err := source.Token(ctx)
 	Expect(err).ToNot(HaveOccurred())
 	keys, err := auth.NewJwksCache().SetLogger(logger).SetCaPool(tool.CaPool()).AddIssuer(issuer).SetRoot(GinkgoT().TempDir()).Build()
@@ -136,6 +131,17 @@ func serviceAccountClaims(ctx context.Context, clientID, secret string) jwt.MapC
 	verified, err := validator.Validate(ctx, token.Access)
 	Expect(err).ToNot(HaveOccurred())
 	return verified.Claims.(jwt.MapClaims)
+}
+
+func serviceAccountTokenSource(ctx context.Context, clientID, secret string) (auth.TokenSource, string) {
+	GinkgoHelper()
+	issuer := serviceAccountKeycloakIssuer(ctx)
+	store, err := auth.NewMemoryTokenStore().SetLogger(logger).Build()
+	Expect(err).ToNot(HaveOccurred())
+	source, err := oauth.NewTokenSource().SetLogger(logger).SetStore(store).SetCaPool(tool.CaPool()).SetIssuer(issuer).
+		SetFlow(oauth.CredentialsFlow).SetClientId(clientID).SetClientSecret(secret).Build()
+	Expect(err).ToNot(HaveOccurred())
+	return source, issuer
 }
 
 // Read only SQL against the Kind fixture, using the database container's local peer authentication.

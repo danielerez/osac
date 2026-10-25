@@ -27,11 +27,12 @@ const RegistrationServiceAccountIDKey = "service_account_id"
 const PendingClientSecretKey = "client_secret"
 const PendingClientSecretRefIDKey = "client_secret_ref_id"
 const PendingClientSecretRefNameKey = "client_secret_ref_name"
+const ManagedClientIDPrefix = "osac-sa-"
 const clientSecretPrefix = "osac-service-account-"
 
 // ClientID derives an immutable client identifier from validated tenant and account identities.
 func ClientID(tenantID, accountID string) string {
-	return "osac-sa-" + tenantID + "-" + accountID
+	return ManagedClientIDPrefix + tenantID + "-" + accountID
 }
 
 // RegistrationSecretName returns a tenant name followed by an optional collision suffix.

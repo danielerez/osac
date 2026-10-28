@@ -1372,6 +1372,7 @@ var _ = Describe("Event publisher", Ordered, func() {
 		})
 
 		It("Rolls back the transaction when processing is canceled", func() {
+			drainPendingChanges()
 			tenant := "cancel-" + uuid.New()
 			insertChange(tenant, "obj-1", "INSERT")
 			Expect(pub.Close()).To(Succeed())

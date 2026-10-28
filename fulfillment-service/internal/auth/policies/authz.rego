@@ -552,6 +552,7 @@ legacy_allow if {
     "/osac.public.v1.ServiceAccounts/List",
     "/osac.public.v1.ServiceAccounts/Update",
     "/osac.public.v1.ServiceAccounts/Delete",
+    "/osac.public.v1.ServiceAccounts/RegenerateSecret",
   }
 }
 

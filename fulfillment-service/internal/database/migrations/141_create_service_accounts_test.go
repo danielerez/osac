@@ -25,7 +25,7 @@ import (
 
 var _ = DescribeMigration("Create ServiceAccount tables", func() {
 	BeforeEach(func(ctx context.Context) {
-		Expect(tool.Migrate(ctx, 140)).To(Succeed())
+		Expect(tool.Migrate(ctx, 141)).To(Succeed())
 		_, err := conn.Exec(ctx, `insert into tenants (id, name, tenant, creator, data)
             values ('sa-tenant-a', 'sa-tenant-a', 'sa-tenant-a', 'system', '{}'),
                    ('sa-tenant-b', 'sa-tenant-b', 'sa-tenant-b', 'system', '{}')`)

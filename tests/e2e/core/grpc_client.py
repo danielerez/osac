@@ -162,8 +162,10 @@ class GRPCClient:
     def delete_subnet(self, *, subnet_id: str) -> None:
         self.call(service=f"{PUBLIC_API}.Subnets/Delete", data={"id": subnet_id})
 
-    def call_unchecked(self, *, service: str, data: dict[str, Any] | None = None) -> tuple[str, int]:
-        return run_unchecked(*self._build_args(service=service, data=data))
+    def call_unchecked(
+        self, *, service: str, data: dict[str, Any] | None = None, timeout: int = 300
+    ) -> tuple[str, int]:
+        return run_unchecked(*self._build_args(service=service, data=data), timeout=timeout)
 
     # Cluster operations
 
